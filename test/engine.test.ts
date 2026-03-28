@@ -633,3 +633,60 @@ test('incremental analysis reuses cached analysis results for identical state an
   assert.strictEqual(secondRun.analysis, firstRun.analysis);
   assert.strictEqual(secondRun.workspace, firstRun.workspace);
 });
+
+test('incremental analysis reuses unaffected fragments across unrelated declaration edits', async () => {
+  let state = createLedgerEngineState();
+  const baseDocument = {
+    content: `2024-01-01 Opening
+  Assets:Cash  10 USD
+  Equity:OpeningBalances  -10 USD
+
+2024-01-02 Lunch
+  Expenses:Food  4 USD
+  Assets:Cash  -4 USD
+
+account Assets:Cash
+account Equity:OpeningBalances
+account Expenses:Food
+commodity USD
+`,
+    isLedger: true,
+    name: 'main.journal',
+    path: 'main.journal',
+  };
+
+  state = await applyLedgerDocumentChanges(
+    state,
+    [{ document: baseDocument, type: 'upsert' }],
+  );
+
+  const firstRun = analyzeLedgerState(state, {
+    availableFilePaths: ['main.journal'],
+    rootFilePaths: ['main.journal'],
+  });
+  const firstCache = firstRun.state.verificationCache;
+
+  assert.ok(firstCache);
+  assert.equal(firstRun.analysis.diagnostics.length, 0);
+
+  state = await applyLedgerDocumentChanges(firstRun.state, [
+    {
+      document: {
+        ...baseDocument,
+        content: `${baseDocument.content}account Expenses:Travel\n`,
+      },
+      type: 'upsert',
+    },
+  ]);
+
+  const secondRun = analyzeLedgerState(state, {
+    availableFilePaths: ['main.journal'],
+    rootFilePaths: ['main.journal'],
+  });
+  const secondCache = secondRun.state.verificationCache;
+
+  assert.ok(secondCache);
+  assert.equal(secondRun.analysis.diagnostics.length, 0);
+  assert.strictEqual(secondCache.fragments[0], firstCache.fragments[0]);
+  assert.strictEqual(secondCache.fragments[1], firstCache.fragments[1]);
+});

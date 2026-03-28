@@ -69,13 +69,17 @@ export type ParsedLedgerPosting = {
 };
 
 export type ParsedLedgerTransaction = {
+  cacheKey: string;
   comment: string;
   date: string;
   description: string;
+  fileOrder: string;
   headerLine: number;
+  path: string;
   postings: ParsedLedgerPosting[];
   secondaryDate: null | string;
   tags: LedgerTag[];
+  transactionId: string;
 };
 
 export type ParsedLedgerIncludeDirective = {
@@ -128,16 +132,15 @@ export type LedgerVerificationBalanceDelta = {
 };
 
 export type LedgerVerificationTransactionDescriptor = {
-  fingerprint: string;
-  fileOrder: string;
+  cacheKey: string;
   parsedFile: ParsedLedgerFile;
   transaction: ParsedLedgerTransaction;
-  transactionId: string;
 };
 
 export type LedgerVerificationFragment = {
   accounts: string[];
   balanceDeltas: LedgerVerificationBalanceDelta[];
+  commodities: string[];
   dependsOnPriorBalances: boolean;
   diagnostics: LedgerDiagnostic[];
   postingCount: number;
@@ -147,7 +150,6 @@ export type LedgerVerificationFragment = {
 };
 
 export type LedgerVerificationCheckpoint = {
-  balances: Map<string, number>;
   inclusiveRunningBalances: Map<string, Map<string, number>>;
   runningBalances: Map<string, Map<string, number>>;
   transactionIndex: number;
@@ -156,8 +158,12 @@ export type LedgerVerificationCheckpoint = {
 export type LedgerVerificationCache = {
   accountDeclarationSignature: string;
   checkpoints: LedgerVerificationCheckpoint[];
+  declaredAccounts: Set<string>;
+  declaredCommodities: Set<string>;
   commodityDeclarationSignature: string;
   fragments: LedgerVerificationFragment[];
+  hasAccountDeclarations: boolean;
+  hasCommodityDeclarations: boolean;
   orderedTransactions: LedgerVerificationTransactionDescriptor[];
 };
 

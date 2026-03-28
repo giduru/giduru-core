@@ -290,7 +290,7 @@ function extractParsedLedgerFileData(
     }
 
     if (nodeName === 'Transaction') {
-      const transaction = extractTransaction(cursor, text, lineStarts);
+      const transaction = extractTransaction(filePath, cursor, text, lineStarts);
 
       if (transaction) {
         transactions.push(transaction);
@@ -494,6 +494,7 @@ function lineNumberAt(position: number, starts: number[]) {
 }
 
 function extractTransaction(
+  filePath: string,
   cursor: TreeCursor,
   text: string,
   lineStarts: number[],
@@ -581,11 +582,14 @@ function extractTransaction(
 
   const transactionComment = extractCommentMetadata(transactionCommentLines);
 
-  return {
+  const headerLine = lineNumberAt(headerFrom, lineStarts);
+  const transaction = {
     comment: transactionComment.text,
     date: primaryDate,
     description,
-    headerLine: lineNumberAt(headerFrom, lineStarts),
+    fileOrder: `${filePath}:${String(headerLine).padStart(8, '0')}`,
+    headerLine,
+    path: filePath,
     postings: postings.map(({ commentLines, ...posting }) => {
       const postingComment = extractCommentMetadata(commentLines);
 
@@ -597,6 +601,12 @@ function extractTransaction(
     }),
     secondaryDate,
     tags: transactionComment.tags,
+    transactionId: `${filePath}:${headerLine}`,
+  } satisfies Omit<ParsedLedgerTransaction, 'cacheKey'>;
+
+  return {
+    ...transaction,
+    cacheKey: buildParsedTransactionCacheKey(transaction),
   } satisfies ParsedLedgerTransaction;
 }
 
@@ -891,6 +901,20 @@ function normalizeTotalPriceAmount(
   }
 
   return Math.sign(postingAmount) * Math.abs(totalPriceAmount);
+}
+
+function buildParsedTransactionCacheKey(
+  transaction: Omit<ParsedLedgerTransaction, 'cacheKey'>,
+) {
+  return `${transaction.transactionId}\n${JSON.stringify({
+    comment: transaction.comment,
+    date: transaction.date,
+    description: transaction.description,
+    headerLine: transaction.headerLine,
+    postings: transaction.postings,
+    secondaryDate: transaction.secondaryDate,
+    tags: transaction.tags,
+  })}`;
 }
 
 function extractPostingBalanceAssertion(

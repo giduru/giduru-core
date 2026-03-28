@@ -32,7 +32,6 @@ type PendingPosting = {
 };
 
 type VerificationRuntimeState = {
-  balances: Map<string, number>;
   inclusiveRunningBalances: AccountBalanceMap;
   runningBalances: AccountBalanceMap;
 };
@@ -82,9 +81,7 @@ export function verifyLedgerWorkspaceWithCache(
 
   for (let index = reusablePrefixLength; index < plan.orderedTransactions.length; index += 1) {
     const descriptor = plan.orderedTransactions[index];
-    const reusableFragment = previousReusableFragments.get(
-      createTransactionDescriptorKey(descriptor),
-    );
+    const reusableFragment = previousReusableFragments.get(descriptor.cacheKey);
     const fragment = reusableFragment
       ? reusableFragment.fragment
       : verifyTransactionFragment({
@@ -95,7 +92,7 @@ export function verifyLedgerWorkspaceWithCache(
           parsedFile: descriptor.parsedFile,
           runtimeState,
           transaction: descriptor.transaction,
-          transactionId: descriptor.transactionId,
+          transactionId: descriptor.transaction.transactionId,
         });
 
     fragments[index] = fragment;
@@ -120,8 +117,12 @@ export function verifyLedgerWorkspaceWithCache(
     cache: {
       accountDeclarationSignature: plan.accountDeclarationSignature,
       checkpoints,
+      declaredAccounts: new Set(plan.declaredAccounts),
+      declaredCommodities: new Set(plan.declaredCommodities),
       commodityDeclarationSignature: plan.commodityDeclarationSignature,
       fragments,
+      hasAccountDeclarations: plan.hasAccountDeclarations,
+      hasCommodityDeclarations: plan.hasCommodityDeclarations,
       orderedTransactions: plan.orderedTransactions,
     },
   };
@@ -223,11 +224,9 @@ function buildVerificationPlan(
 
     for (const transaction of parsedFile.transactions) {
       orderedTransactions.push({
-        fingerprint: buildTransactionFingerprint(parsedFile.file.path, transaction),
-        fileOrder: `${parsedFile.file.path}:${String(transaction.headerLine).padStart(8, '0')}`,
+        cacheKey: transaction.cacheKey,
         parsedFile,
         transaction,
-        transactionId: `${parsedFile.file.path}:${transaction.headerLine}`,
       });
       postingCount += transaction.postings.length;
     }
@@ -235,11 +234,7 @@ function buildVerificationPlan(
 
   orderedTransactions.sort((left, right) => {
     if (left.transaction.date === right.transaction.date) {
-      if (left.parsedFile.file.path === right.parsedFile.file.path) {
-        return left.transaction.headerLine - right.transaction.headerLine;
-      }
-
-      return left.parsedFile.file.path.localeCompare(right.parsedFile.file.path);
+      return left.transaction.fileOrder.localeCompare(right.transaction.fileOrder);
     }
 
     return left.transaction.date.localeCompare(right.transaction.date);
@@ -274,13 +269,6 @@ function getReusablePrefixLength(
     return 0;
   }
 
-  if (
-    previousCache.accountDeclarationSignature !== plan.accountDeclarationSignature ||
-    previousCache.commodityDeclarationSignature !== plan.commodityDeclarationSignature
-  ) {
-    return 0;
-  }
-
   const maxLength = Math.min(
     plan.orderedTransactions.length,
     previousCache.orderedTransactions.length,
@@ -291,10 +279,12 @@ function getReusablePrefixLength(
   while (index < maxLength) {
     const current = plan.orderedTransactions[index];
     const previous = previousCache.orderedTransactions[index];
+    const previousFragment = previousCache.fragments[index];
 
     if (
-      current.transactionId !== previous.transactionId ||
-      current.fingerprint !== previous.fingerprint
+      current.cacheKey !== previous.cacheKey ||
+      !previousFragment ||
+      !hasStableFragmentDeclarationContext(previousFragment, previousCache, plan)
     ) {
       break;
     }
@@ -329,7 +319,6 @@ function restoreRuntimeStateFromCache(
   const checkpoint = findBestCheckpoint(previousCache.checkpoints, reusablePrefixLength);
   const runtimeState = checkpoint
     ? {
-        balances: cloneCommodityTotalMap(checkpoint.balances),
         inclusiveRunningBalances: cloneAccountBalanceMap(checkpoint.inclusiveRunningBalances),
         runningBalances: cloneAccountBalanceMap(checkpoint.runningBalances),
       }
@@ -361,11 +350,7 @@ function buildReusableFragmentLookup(
     }
   >();
 
-  if (
-    !previousCache ||
-    previousCache.accountDeclarationSignature !== plan.accountDeclarationSignature ||
-    previousCache.commodityDeclarationSignature !== plan.commodityDeclarationSignature
-  ) {
+  if (!previousCache) {
     return reusable;
   }
 
@@ -373,17 +358,78 @@ function buildReusableFragmentLookup(
     const descriptor = previousCache.orderedTransactions[index];
     const fragment = previousCache.fragments[index];
 
-    if (!fragment || fragment.dependsOnPriorBalances) {
+    if (
+      !fragment ||
+      fragment.dependsOnPriorBalances ||
+      !hasStableFragmentDeclarationContext(fragment, previousCache, plan)
+    ) {
       continue;
     }
 
-    reusable.set(createTransactionDescriptorKey(descriptor), {
+    reusable.set(descriptor.cacheKey, {
       fragment,
       index,
     });
   }
 
   return reusable;
+}
+
+function hasStableFragmentDeclarationContext(
+  fragment: LedgerVerificationFragment,
+  previousCache: LedgerVerificationCache,
+  plan: LedgerVerificationPlan,
+) {
+  if (
+    previousCache.accountDeclarationSignature === plan.accountDeclarationSignature &&
+    previousCache.commodityDeclarationSignature === plan.commodityDeclarationSignature
+  ) {
+    return true;
+  }
+
+  return (
+    hasStableDeclarationStatuses(
+      fragment.accounts,
+      previousCache.hasAccountDeclarations,
+      previousCache.declaredAccounts,
+      plan.hasAccountDeclarations,
+      plan.declaredAccounts,
+    ) &&
+    hasStableDeclarationStatuses(
+      fragment.commodities,
+      previousCache.hasCommodityDeclarations,
+      previousCache.declaredCommodities,
+      plan.hasCommodityDeclarations,
+      plan.declaredCommodities,
+    )
+  );
+}
+
+function hasStableDeclarationStatuses(
+  symbols: string[],
+  previousIsStrict: boolean,
+  previousDeclarations: Set<string>,
+  nextIsStrict: boolean,
+  nextDeclarations: Set<string>,
+) {
+  for (const symbol of symbols) {
+    if (
+      isDeclaredForVerification(symbol, previousIsStrict, previousDeclarations) !==
+      isDeclaredForVerification(symbol, nextIsStrict, nextDeclarations)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isDeclaredForVerification(
+  symbol: string,
+  isStrict: boolean,
+  declarations: Set<string>,
+) {
+  return !isStrict || declarations.has(symbol);
 }
 
 function findBestCheckpoint(
@@ -403,7 +449,6 @@ function findBestCheckpoint(
 
 function createVerificationRuntimeState(): VerificationRuntimeState {
   return {
-    balances: new Map(),
     inclusiveRunningBalances: new Map(),
     runningBalances: new Map(),
   };
@@ -414,7 +459,6 @@ function createVerificationCheckpoint(
   runtimeState: VerificationRuntimeState,
 ): LedgerVerificationCheckpoint {
   return {
-    balances: cloneCommodityTotalMap(runtimeState.balances),
     inclusiveRunningBalances: cloneAccountBalanceMap(runtimeState.inclusiveRunningBalances),
     runningBalances: cloneAccountBalanceMap(runtimeState.runningBalances),
     transactionIndex,
@@ -425,15 +469,10 @@ function cloneVerificationCheckpoint(
   checkpoint: LedgerVerificationCheckpoint,
 ): LedgerVerificationCheckpoint {
   return {
-    balances: cloneCommodityTotalMap(checkpoint.balances),
     inclusiveRunningBalances: cloneAccountBalanceMap(checkpoint.inclusiveRunningBalances),
     runningBalances: cloneAccountBalanceMap(checkpoint.runningBalances),
     transactionIndex: checkpoint.transactionIndex,
   };
-}
-
-function cloneCommodityTotalMap(source: Map<string, number>) {
-  return new Map(source);
 }
 
 function cloneAccountBalanceMap(source: AccountBalanceMap) {
@@ -481,15 +520,12 @@ function materializeLedgerAnalysis(
 
   return {
     accounts: Array.from(accounts).sort((left, right) => left.localeCompare(right)),
-    balances: Array.from(runtimeState.balances.entries())
-      .filter(([key]) => {
-        const [account, commodity] = key.split('::');
-        return Boolean(account) && Boolean(commodity);
-      })
-      .map(([key, amount]) => {
-        const [account, commodity] = key.split('::');
-        return { account, amount, commodity };
-      })
+    balances: Array.from(runtimeState.runningBalances.entries())
+      .flatMap(([account, totals]) =>
+        Array.from(totals.entries())
+          .filter(([commodity]) => Boolean(account) && Boolean(commodity))
+          .map(([commodity, amount]) => ({ account, amount, commodity })),
+      )
       .sort((left, right) => {
         if (left.account === right.account) {
           return left.commodity.localeCompare(right.commodity);
@@ -552,6 +588,7 @@ function verifyTransactionFragment(args: {
   } = args;
   const accounts = new Set<string>();
   const balanceDeltas: LedgerVerificationBalanceDelta[] = [];
+  const commodities = new Set<string>();
   const dependsOnPriorBalances = transaction.postings.some((posting) => posting.balanceAssertion);
   const diagnostics: LedgerDiagnostic[] = [];
   const prices: LedgerPrice[] = [];
@@ -586,6 +623,11 @@ function verifyTransactionFragment(args: {
 
   for (const posting of transaction.postings) {
     accounts.add(posting.account);
+
+    if (posting.commodity) {
+      commodities.add(posting.commodity);
+    }
+
     validatePostingDeclarations(
       posting,
       parsedFile,
@@ -706,6 +748,7 @@ function verifyTransactionFragment(args: {
   return {
     accounts: Array.from(accounts),
     balanceDeltas,
+    commodities: Array.from(commodities),
     dependsOnPriorBalances,
     diagnostics,
     postingCount: transaction.postings.length,
@@ -717,10 +760,10 @@ function verifyTransactionFragment(args: {
             comment: transaction.comment,
             date: transaction.date,
             description: transaction.description,
-            fileOrder: `${parsedFile.file.path}:${String(transaction.headerLine).padStart(8, '0')}`,
+            fileOrder: transaction.fileOrder,
             id: transactionId,
             line: transaction.headerLine,
-            path: parsedFile.file.path,
+            path: transaction.path,
             postings: transactionEntries,
             searchText: buildSearchText([
               transaction.date,
@@ -1164,11 +1207,6 @@ function applyBalanceDelta(
   runtimeState: VerificationRuntimeState,
   delta: LedgerVerificationBalanceDelta,
 ) {
-  addToCommodityTotals(
-    runtimeState.balances,
-    `${delta.account}::${delta.commodity}`,
-    delta.amount,
-  );
   addToAccountBalanceMap(runtimeState.runningBalances, delta.account, delta.commodity, delta.amount);
 
   for (const account of getAccountAncestors(delta.account)) {
@@ -1636,12 +1674,6 @@ function buildDeclarationSignature(values: Set<string>) {
   return Array.from(values).sort((left, right) => left.localeCompare(right)).join('\n');
 }
 
-function createTransactionDescriptorKey(
-  descriptor: LedgerVerificationTransactionDescriptor,
-) {
-  return `${descriptor.transactionId}\n${descriptor.fingerprint}`;
-}
-
 function appendDateEntries<T>(
   entriesByDate: Map<string, T[]>,
   date: string,
@@ -1715,30 +1747,6 @@ function mergeSortedPrices(
   }
 
   return merged;
-}
-
-function buildTransactionFingerprint(path: string, transaction: ParsedLedgerTransaction) {
-  return JSON.stringify({
-    comment: transaction.comment,
-    date: transaction.date,
-    description: transaction.description,
-    headerLine: transaction.headerLine,
-    path,
-    postings: transaction.postings.map((posting) => ({
-      account: posting.account,
-      amount: posting.amount,
-      amountPrecision: posting.amountPrecision,
-      balanceAssertion: posting.balanceAssertion,
-      comment: posting.comment,
-      commodity: posting.commodity,
-      kind: posting.kind,
-      line: posting.line,
-      priceAnnotation: posting.priceAnnotation,
-      tags: posting.tags,
-    })),
-    secondaryDate: transaction.secondaryDate,
-    tags: transaction.tags,
-  });
 }
 
 function formatCommodityAmount(commodity: string, amount: number) {
