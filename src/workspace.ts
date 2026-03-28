@@ -1,5 +1,9 @@
 import { basename } from './path';
-import { parseLedgerDocument, parseLedgerWorkspace } from './parser';
+import {
+  type LedgerDocumentParseCache,
+  parseLedgerDocumentWithCache,
+  parseLedgerWorkspaceWithCache,
+} from './parser';
 import { verifyLedgerWorkspaceWithCache } from './verifier';
 import type {
   LedgerAnalysis,
@@ -10,6 +14,11 @@ import type {
   ParsedLedgerWorkspace,
   VerifyLedgerOptions,
 } from './types';
+
+const PARSE_CACHES_BY_STATE = new WeakMap<
+  LedgerEngineState,
+  Map<string, LedgerDocumentParseCache>
+>();
 
 type ApplyLedgerDocumentChangesOptions = {
   onProgress?: (progress: ParseLedgerProgress) => void;
@@ -26,7 +35,7 @@ export function createLedgerEngineState(
     documentsByPath.set(document.path, document);
   }
 
-  return {
+  const state = {
     documentsByPath,
     lastUpdateStats: {
       parsedFileCount: 0,
@@ -36,6 +45,9 @@ export function createLedgerEngineState(
     parsedFilesByPath: new Map(),
     verificationCache: null,
   };
+
+  PARSE_CACHES_BY_STATE.set(state, new Map());
+  return state;
 }
 
 export async function applyLedgerDocumentChanges(
@@ -45,6 +57,8 @@ export async function applyLedgerDocumentChanges(
 ): Promise<LedgerEngineState> {
   const documentsByPath = new Map(state.documentsByPath);
   const parsedFilesByPath = new Map(state.parsedFilesByPath);
+  const previousParseCaches = PARSE_CACHES_BY_STATE.get(state) ?? new Map();
+  const parseCachesByPath = new Map(previousParseCaches);
   const changedPaths = new Set<string>();
   let knownPathSetChanged = false;
 
@@ -52,6 +66,7 @@ export async function applyLedgerDocumentChanges(
     if (change.type === 'delete') {
       const hadDocument = documentsByPath.delete(change.path);
       const hadParsedFile = parsedFilesByPath.delete(change.path);
+      parseCachesByPath.delete(change.path);
 
       if (hadDocument || hadParsedFile) {
         changedPaths.add(change.path);
@@ -93,6 +108,7 @@ export async function applyLedgerDocumentChanges(
     for (const [path, parsedFile] of parsedFilesByPath.entries()) {
       if (!documentsByPath.get(path)?.isLedger) {
         parsedFilesByPath.delete(path);
+        parseCachesByPath.delete(path);
         continue;
       }
 
@@ -114,6 +130,7 @@ export async function applyLedgerDocumentChanges(
 
     if (!document?.isLedger) {
       parsedFilesByPath.delete(path);
+      parseCachesByPath.delete(path);
       continue;
     }
 
@@ -124,8 +141,15 @@ export async function applyLedgerDocumentChanges(
       phase: 'parsing',
     });
 
-    const parsedFile = parseLedgerDocument(document, { knownFilePaths });
+    const previousDocument = state.documentsByPath.get(path);
+    const previousCache = previousParseCaches.get(path);
+    const { cache, parsedFile } = parseLedgerDocumentWithCache(document, {
+      knownFilePaths,
+      previousContent: previousDocument?.content,
+      previousTree: previousCache?.tree,
+    });
     parsedFilesByPath.set(path, parsedFile);
+    parseCachesByPath.set(path, cache);
     totalParseMs += parsedFile.stats.parseMs;
   }
 
@@ -136,7 +160,7 @@ export async function applyLedgerDocumentChanges(
     phase: 'complete',
   });
 
-  return {
+  const nextState = {
     documentsByPath,
     lastUpdateStats: {
       parsedFileCount: orderedTargets.length,
@@ -146,6 +170,9 @@ export async function applyLedgerDocumentChanges(
     parsedFilesByPath,
     verificationCache: state.verificationCache,
   };
+
+  PARSE_CACHES_BY_STATE.set(nextState, parseCachesByPath);
+  return nextState;
 }
 
 export function buildParsedLedgerWorkspace(
@@ -202,10 +229,13 @@ export async function analyzeLedgerDocuments(
   state: LedgerEngineState;
   workspace: ParsedLedgerWorkspace;
 }> {
-  const parsedWorkspace = await parseLedgerWorkspace(documentsByPath, {
+  const { parseCachesByPath, workspace: parsedWorkspace } = await parseLedgerWorkspaceWithCache(
+    documentsByPath,
+    {
     onProgress: options.onProgress,
     rootFilePaths: options.rootFilePaths ?? [],
-  });
+    },
+  );
   const state = createLedgerEngineState(documentsByPath.values());
 
   for (const parsedFile of parsedWorkspace.files) {
@@ -223,6 +253,7 @@ export async function analyzeLedgerDocuments(
     null,
   );
   state.verificationCache = cache;
+  PARSE_CACHES_BY_STATE.set(state, new Map(parseCachesByPath));
 
   return {
     analysis,

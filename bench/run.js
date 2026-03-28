@@ -8,6 +8,8 @@ const {
   applyLedgerDocumentChanges,
 } = require('../dist/src');
 
+const BYTES_PER_MB = 1024 * 1024;
+
 const PRESETS = {
   small: {
     deepIncludeMonthsPerYear: 6,
@@ -40,6 +42,17 @@ const PRESETS = {
     iterations: 2,
     pricedTransactionCount: 16000,
     simpleTransactionCount: 30000,
+    warmup: 1,
+  },
+  enterprise: {
+    deepIncludeMonthsPerYear: 12,
+    deepIncludeTransactionCountPerMonth: 360,
+    deepIncludeYears: 10,
+    globFileCount: 240,
+    globTransactionsPerFile: 600,
+    iterations: 2,
+    pricedTransactionCount: 60000,
+    simpleTransactionCount: 120000,
     warmup: 1,
   },
 };
@@ -115,6 +128,8 @@ async function main() {
           `txns ${metrics.transactionCount}`,
           `parsed ${metrics.parsedFileCount}`,
           `reused ${metrics.reusedFileCount}`,
+          `heap ${formatMb(metrics.heapUsedMb)}`,
+          `rss ${formatMb(metrics.rssMb)}`,
         ].join('  '),
       );
     }
@@ -140,6 +155,8 @@ async function main() {
       verify_avg_ms: result.verifyMs.avg.toFixed(2),
       parsed_avg: result.parsedFileCount.avg.toFixed(2),
       reused_avg: result.reusedFileCount.avg.toFixed(2),
+      heap_avg_mb: result.heapUsedMb.avg.toFixed(1),
+      rss_avg_mb: result.rssMb.avg.toFixed(1),
     })),
   );
 }
@@ -235,7 +252,8 @@ function buildScenarios(config) {
       async setup() {
         const workspace = buildGlobWorkspace(config);
         const seeded = await seedIncrementalState(workspace.documents, workspace.rootFilePath);
-        const targetPath = `monthly/2024-01.journal`;
+        const targetMonthIndex = Math.max(0, config.globFileCount - 1);
+        const targetPath = `monthly/${formatGlobMonth(targetMonthIndex)}.journal`;
         const original = workspace.documents.get(targetPath);
 
         if (!original) {
@@ -252,7 +270,53 @@ function buildScenarios(config) {
           targetPath,
           updatedDocument: createLedgerDocument(
             targetPath,
-            `${original.content}\n${buildSimpleTransaction(999_001)}`,
+            `${original.content}\n${buildMonthlyTransaction({
+              entryIndex: config.globTransactionsPerFile,
+              monthIndex: targetMonthIndex,
+            })}`,
+            2,
+          ),
+        };
+      },
+      async run(context) {
+        return runIncrementalAnalysis(
+          context.baseState,
+          context.rootFilePath,
+          [{ document: context.updatedDocument, type: 'upsert' }],
+        );
+      },
+    },
+    {
+      description: 'Worst-case incremental edit near the start of the ordered transaction stream.',
+      kind: 'incremental',
+      name: 'incremental-early-edit',
+      async setup() {
+        const workspace = buildGlobWorkspace(config);
+        const seeded = await seedIncrementalState(workspace.documents, workspace.rootFilePath);
+        const targetMonthIndex = 0;
+        const targetPath = `monthly/${formatGlobMonth(targetMonthIndex)}.journal`;
+
+        return {
+          ...workspace,
+          baseState: seeded.state,
+          dataset: {
+            fileCount: workspace.documents.size,
+            transactionCount: workspace.transactionCount,
+          },
+          targetPath,
+          updatedDocument: createLedgerDocument(
+            targetPath,
+            buildMonthlyJournal({
+              monthIndex: targetMonthIndex,
+              transactionCount: config.globTransactionsPerFile,
+              transformTransaction(transaction, info) {
+                if (info.entryIndex !== 1) {
+                  return transaction;
+                }
+
+                return transaction.replace('CAD 6.34', 'CAD 16.34');
+              },
+            }),
             2,
           ),
         };
@@ -272,13 +336,17 @@ function buildScenarios(config) {
       async setup() {
         const workspace = buildGlobWorkspace(config);
         const seeded = await seedIncrementalState(workspace.documents, workspace.rootFilePath);
-        const targetPath = `monthly/2028-01.journal`;
+        const targetMonthIndex = config.globFileCount;
+        const targetPath = `monthly/${formatGlobMonth(targetMonthIndex)}.journal`;
 
         return {
           ...workspace,
           addedDocument: createLedgerDocument(
             targetPath,
-            buildMonthlyJournal({ monthIndex: 99, transactionCount: Math.max(24, Math.floor(config.globTransactionsPerFile / 2)) }),
+            buildMonthlyJournal({
+              monthIndex: targetMonthIndex,
+              transactionCount: Math.max(24, Math.floor(config.globTransactionsPerFile / 2)),
+            }),
             2,
           ),
           baseState: seeded.state,
@@ -297,6 +365,43 @@ function buildScenarios(config) {
       },
     },
     {
+      description: 'Incremental edit of a declaration file that invalidates global account strictness.',
+      kind: 'incremental',
+      name: 'incremental-declaration-edit',
+      async setup() {
+        const workspace = buildGlobWorkspace(config);
+        const seeded = await seedIncrementalState(workspace.documents, workspace.rootFilePath);
+        const targetPath = 'config/accounts.journal';
+        const original = workspace.documents.get(targetPath);
+
+        if (!original) {
+          throw new Error(`Missing benchmark target file: ${targetPath}`);
+        }
+
+        return {
+          ...workspace,
+          baseState: seeded.state,
+          dataset: {
+            fileCount: workspace.documents.size,
+            transactionCount: workspace.transactionCount,
+          },
+          targetPath,
+          updatedDocument: createLedgerDocument(
+            targetPath,
+            `${original.content.trimEnd()}\naccount Expenses:Legal\n`,
+            2,
+          ),
+        };
+      },
+      async run(context) {
+        return runIncrementalAnalysis(
+          context.baseState,
+          context.rootFilePath,
+          [{ document: context.updatedDocument, type: 'upsert' }],
+        );
+      },
+    },
+    {
       description: 'Incremental deletion of a file matched by a root glob include.',
       kind: 'incremental',
       name: 'incremental-glob-delete',
@@ -311,7 +416,7 @@ function buildScenarios(config) {
             fileCount: workspace.documents.size,
             transactionCount: workspace.transactionCount,
           },
-          deletedPath: `monthly/2024-02.journal`,
+          deletedPath: `monthly/${formatGlobMonth(Math.floor(config.globFileCount / 2))}.journal`,
         };
       },
       async run(context) {
@@ -320,6 +425,27 @@ function buildScenarios(config) {
           context.rootFilePath,
           [{ path: context.deletedPath, type: 'delete' }],
         );
+      },
+    },
+    {
+      description: 'Repeated analysis of an unchanged state to expose pure cached-materialization cost.',
+      kind: 'incremental',
+      name: 'incremental-noop-analysis',
+      async setup() {
+        const workspace = buildGlobWorkspace(config);
+        const seeded = await seedIncrementalState(workspace.documents, workspace.rootFilePath);
+
+        return {
+          ...workspace,
+          baseState: seeded.state,
+          dataset: {
+            fileCount: workspace.documents.size,
+            transactionCount: workspace.transactionCount,
+          },
+        };
+      },
+      async run(context) {
+        return runStateAnalysis(context.baseState, context.rootFilePath);
       },
     },
   ];
@@ -372,15 +498,37 @@ async function runIncrementalAnalysis(baseState, rootFilePath, changes) {
   });
 }
 
+async function runStateAnalysis(baseState, rootFilePath) {
+  const startedAt = performance.now();
+  const { analysis } = analyzeLedgerState(baseState, {
+    availableFilePaths: Array.from(baseState.documentsByPath.keys()),
+    rootFilePaths: [rootFilePath],
+  });
+
+  return {
+    ...metricsFromRun({
+      analysis,
+      parsedFileCount: 0,
+      reusedFileCount: baseState.parsedFilesByPath.size,
+      wallMs: performance.now() - startedAt,
+    }),
+    parseMs: 0,
+  };
+}
+
 function metricsFromRun({ analysis, parsedFileCount, reusedFileCount, wallMs }) {
+  const memory = process.memoryUsage();
+
   return {
     diagnosticMessages: analysis.diagnostics.map((diagnostic) => diagnostic.message),
     diagnosticsCount: analysis.diagnostics.length,
     fileCount: analysis.parserSummary.fileCount,
+    heapUsedMb: memory.heapUsed / BYTES_PER_MB,
     parsedFileCount,
     parseMs: analysis.timings.parseMs,
     parserErrorCount: analysis.parserSummary.errorNodeCount,
     reusedFileCount,
+    rssMb: memory.rss / BYTES_PER_MB,
     transactionCount: analysis.summary.transactionCount,
     verifyMs: analysis.timings.verifyMs,
     wallMs,
@@ -400,10 +548,12 @@ function ensureHealthyScenario(name, metrics) {
 function summarizeScenario(scenario, context, samples) {
   return {
     dataset: context.dataset,
+    heapUsedMb: summarizeMetric(samples.map((sample) => sample.heapUsedMb)),
     kind: scenario.kind,
     name: scenario.name,
     parseMs: summarizeMetric(samples.map((sample) => sample.parseMs)),
     parsedFileCount: summarizeMetric(samples.map((sample) => sample.parsedFileCount)),
+    rssMb: summarizeMetric(samples.map((sample) => sample.rssMb)),
     reusedFileCount: summarizeMetric(samples.map((sample) => sample.reusedFileCount)),
     verifyMs: summarizeMetric(samples.map((sample) => sample.verifyMs)),
     wallMs: summarizeMetric(samples.map((sample) => sample.wallMs)),
@@ -573,20 +723,31 @@ function buildGlobWorkspace(config) {
   };
 }
 
-function buildMonthlyJournal({ monthIndex, transactionCount }) {
+function buildMonthlyJournal({ monthIndex, transactionCount, transformTransaction = null }) {
   const entries = [];
 
-  for (let index = 0; index < transactionCount; index += 1) {
-    const globalIndex = monthIndex * 10_000 + index;
-    const usePriced = globalIndex % 5 === 0;
-    entries.push(usePriced ? buildPricedTransaction(globalIndex) : buildSimpleTransaction(globalIndex));
+  for (let entryIndex = 0; entryIndex < transactionCount; entryIndex += 1) {
+    const transaction = buildMonthlyTransaction({ entryIndex, monthIndex });
+    entries.push(
+      transformTransaction
+        ? transformTransaction(transaction, { entryIndex, monthIndex })
+        : transaction,
+    );
   }
 
   return `${entries.join('\n')}\n`;
 }
 
-function buildSimpleTransaction(index) {
-  const date = dateForIndex(index);
+function buildMonthlyTransaction({ entryIndex, monthIndex }) {
+  const globalIndex = monthIndex * 10_000 + entryIndex;
+  const date = dateForMonthEntry(monthIndex, entryIndex);
+
+  return globalIndex % 5 === 0
+    ? buildPricedTransaction(globalIndex, date)
+    : buildSimpleTransaction(globalIndex, date);
+}
+
+function buildSimpleTransaction(index, date = dateForIndex(index)) {
   const expenseAccount = [
     'Expenses:Food',
     'Expenses:Housing',
@@ -603,8 +764,7 @@ function buildSimpleTransaction(index) {
   ].join('\n');
 }
 
-function buildPricedTransaction(index) {
-  const date = dateForIndex(index + 91);
+function buildPricedTransaction(index, date = dateForIndex(index + 91)) {
   const symbol = ['"HSUV.U"', '"VEQT"', '"XSP"', '"CASH"'][index % 4];
 
   if (index % 7 === 0) {
@@ -662,6 +822,13 @@ function dateForIndex(index) {
   return `${year}-${month}-${day}`;
 }
 
+function dateForMonthEntry(monthIndex, entryIndex) {
+  const year = 2024 + Math.floor(monthIndex / 12);
+  const month = (monthIndex % 12) + 1;
+  const day = String((entryIndex % 28) + 1).padStart(2, '0');
+  return `${year}-${String(month).padStart(2, '0')}-${day}`;
+}
+
 function roundTo(value, precision) {
   const factor = 10 ** precision;
   return Math.round(value * factor) / factor;
@@ -673,6 +840,10 @@ function formatFixed(value, precision) {
 
 function formatMs(value) {
   return `${value.toFixed(2)}ms`;
+}
+
+function formatMb(value) {
+  return `${value.toFixed(1)}MB`;
 }
 
 function parseArgs(argv) {

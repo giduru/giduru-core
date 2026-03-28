@@ -88,11 +88,13 @@ npm run bench -- --preset medium
 
 Supported flags:
 
-- `--preset small|medium|large`
+- `--preset small|medium|large|enterprise`
 - `--iterations N`
 - `--warmup N`
 - `--filter substring`
 - `--json`
+
+The harness prints wall time, parse time, verify time, parsed/reused file counts, and Node heap/RSS usage.
 
 The harness covers:
 
@@ -100,4 +102,9 @@ The harness covers:
 - large single-file priced journals
 - deep static include graphs
 - glob-included workspaces
-- incremental leaf edits, file additions, and file deletions
+- incremental leaf edits and worst-case early edits
+- declaration-file edits that invalidate global strictness
+- glob file additions and deletions
+- no-op cached analyses to expose pure materialization overhead
+
+The `enterprise` preset is intended for capacity planning rather than quick local smoke tests. It pushes file counts and transaction counts high enough to surface index, memory, and invalidation behavior on much larger synthetic ledgers.

@@ -1,3 +1,4 @@
+import { TreeFragment, type Tree } from '@lezer/common';
 import { parser as hledgerParser } from 'codemirror-lang-hledger';
 
 import {
@@ -30,6 +31,25 @@ type ParseLedgerDocumentOptions = {
   knownFilePaths: Iterable<string>;
 };
 
+type ParseLedgerDocumentWithCacheOptions = ParseLedgerDocumentOptions & {
+  previousContent?: string;
+  previousTree?: Tree;
+};
+
+export type LedgerDocumentParseCache = {
+  tree: Tree;
+};
+
+type ParseLedgerDocumentResult = {
+  cache: LedgerDocumentParseCache;
+  parsedFile: ParsedLedgerFile;
+};
+
+type ParseLedgerWorkspaceResult = {
+  parseCachesByPath: Map<string, LedgerDocumentParseCache>;
+  workspace: ParsedLedgerWorkspace;
+};
+
 type TreeCursor = ReturnType<ReturnType<typeof hledgerParser.parse>['cursor']>;
 type ParsedLedgerPostingDraft = Omit<
   ParsedLedgerPosting,
@@ -43,11 +63,24 @@ export function parseLedgerDocument(
   document: LedgerSourceDocument,
   options: ParseLedgerDocumentOptions,
 ): ParsedLedgerFile {
+  return parseLedgerDocumentWithCache(document, options).parsedFile;
+}
+
+export function parseLedgerDocumentWithCache(
+  document: LedgerSourceDocument,
+  options: ParseLedgerDocumentWithCacheOptions,
+): ParseLedgerDocumentResult {
   const parseStartedAt = Date.now();
-  const tree = hledgerParser.parse(document.content);
+  const tree = parseLedgerTree(document.content, options.previousContent, options.previousTree);
   const parseMs = Date.now() - parseStartedAt;
   const lineStarts = buildLineStarts(document.content);
-  const includeDirectives = extractIncludeDirectives(
+  const {
+    declaredAccounts,
+    declaredCommodities,
+    includeDirectives,
+    prices,
+    transactions,
+  } = extractParsedLedgerFileData(
     document.path,
     tree,
     document.content,
@@ -67,13 +100,9 @@ export function parseLedgerDocument(
     }
   });
 
-  const { declaredAccounts, declaredCommodities, prices } = extractDirectives(
-    tree,
-    document.content,
-    lineStarts,
-  );
-
   return {
+    cache: { tree },
+    parsedFile: {
     declaredAccounts,
     declaredCommodities,
     directiveDiagnostics: buildIncludeDiagnostics(document.path, includeDirectives),
@@ -100,14 +129,22 @@ export function parseLedgerDocument(
         'Lezer parser reported a syntax error node.',
       ),
     ),
-    transactions: extractTransactions(tree, document.content, lineStarts),
-  } satisfies ParsedLedgerFile;
+    transactions,
+    } satisfies ParsedLedgerFile,
+  };
 }
 
 export async function parseLedgerWorkspace(
   documentsByPath: Map<string, LedgerSourceDocument>,
   options: ParseLedgerWorkspaceOptions,
 ): Promise<ParsedLedgerWorkspace> {
+  return (await parseLedgerWorkspaceWithCache(documentsByPath, options)).workspace;
+}
+
+export async function parseLedgerWorkspaceWithCache(
+  documentsByPath: Map<string, LedgerSourceDocument>,
+  options: ParseLedgerWorkspaceOptions,
+): Promise<ParseLedgerWorkspaceResult> {
   const rootFilePaths = Array.from(
     new Set(options.rootFilePaths.filter((path) => documentsByPath.get(path)?.isLedger)),
   ).sort((left, right) => left.localeCompare(right));
@@ -115,6 +152,7 @@ export async function parseLedgerWorkspace(
   const queued = new Set(rootFilePaths);
   const queue = [...rootFilePaths];
   const parsedFilesByPath = new Map<string, ParsedLedgerFile>();
+  const parseCachesByPath = new Map<string, ParseLedgerDocumentResult['cache']>();
   let totalParseMs = 0;
 
   while (queue.length > 0) {
@@ -140,11 +178,12 @@ export async function parseLedgerWorkspace(
     });
 
     await yieldToMainThread();
-    const parsedFile = parseLedgerDocument(document, {
+    const { cache, parsedFile } = parseLedgerDocumentWithCache(document, {
       knownFilePaths: documentsByPath.keys(),
     });
 
     parsedFilesByPath.set(currentPath, parsedFile);
+    parseCachesByPath.set(currentPath, cache);
     totalParseMs += parsedFile.stats.parseMs;
 
     for (const target of parsedFile.includeTargets) {
@@ -169,12 +208,15 @@ export async function parseLedgerWorkspace(
   });
 
   return {
-    files: Array.from(parsedFilesByPath.values()).sort((left, right) =>
-      left.file.path.localeCompare(right.file.path),
-    ),
-    reusedFileCount: 0,
-    rootFilePaths,
-    totalParseMs,
+    parseCachesByPath,
+    workspace: {
+      files: Array.from(parsedFilesByPath.values()).sort((left, right) =>
+        left.file.path.localeCompare(right.file.path),
+      ),
+      reusedFileCount: 0,
+      rootFilePaths,
+      totalParseMs,
+    },
   };
 }
 
@@ -184,22 +226,33 @@ async function yieldToMainThread() {
   });
 }
 
-function extractDirectives(
+function extractParsedLedgerFileData(
+  filePath: string,
   tree: ReturnType<typeof hledgerParser.parse>,
   text: string,
   lineStarts: number[],
+  knownFilePaths: Iterable<string>,
 ) {
+  const includeDirectives: ParsedLedgerIncludeDirective[] = [];
   const declaredAccounts: string[] = [];
   const declaredCommodities: string[] = [];
   const prices: ParsedLedgerPrice[] = [];
+  const transactions: ParsedLedgerTransaction[] = [];
   const cursor = tree.cursor();
 
   if (!cursor.firstChild()) {
-    return { declaredAccounts, declaredCommodities, prices };
+    return { declaredAccounts, declaredCommodities, includeDirectives, prices, transactions };
   }
 
   do {
     const nodeName = cursor.type.name as string;
+
+    if (nodeName === 'IncludeDirective') {
+      includeDirectives.push(
+        extractIncludeDirective(filePath, cursor, text, lineStarts, knownFilePaths),
+      );
+      continue;
+    }
 
     if (nodeName === 'AccountDirective') {
       if (cursor.firstChild()) {
@@ -236,6 +289,16 @@ function extractDirectives(
       continue;
     }
 
+    if (nodeName === 'Transaction') {
+      const transaction = extractTransaction(cursor, text, lineStarts);
+
+      if (transaction) {
+        transactions.push(transaction);
+      }
+
+      continue;
+    }
+
     if (nodeName === 'PriceDirective') {
       const price = extractPriceDirective(cursor, text, lineStarts);
 
@@ -246,65 +309,7 @@ function extractDirectives(
   } while (cursor.nextSibling());
 
   cursor.parent();
-  return { declaredAccounts, declaredCommodities, prices };
-}
-
-function extractDeclaredCommodity(argument: string) {
-  const trimmed = argument.trim();
-
-  if (!trimmed) {
-    return null;
-  }
-
-  const quotedMatch = trimmed.match(/^"[^"\n]+"/);
-
-  if (quotedMatch) {
-    return quotedMatch[0];
-  }
-
-  const leadingMatch = trimmed.match(/^[^\s\d,+-]+/);
-
-  if (leadingMatch) {
-    return leadingMatch[0];
-  }
-
-  const trailingQuotedMatch = trimmed.match(/"[^"\n]+"$/);
-
-  if (trailingQuotedMatch) {
-    return trailingQuotedMatch[0];
-  }
-
-  const trailingMatch = trimmed.match(/[^\s\d,+-]+$/);
-
-  return trailingMatch?.[0] ?? null;
-}
-
-function extractIncludeDirectives(
-  filePath: string,
-  tree: ReturnType<typeof hledgerParser.parse>,
-  text: string,
-  lineStarts: number[],
-  knownFilePaths: Iterable<string>,
-) {
-  const directives: ParsedLedgerIncludeDirective[] = [];
-  const cursor = tree.cursor();
-
-  if (!cursor.firstChild()) {
-    return directives;
-  }
-
-  do {
-    if ((cursor.type.name as string) !== 'IncludeDirective') {
-      continue;
-    }
-
-    directives.push(
-      extractIncludeDirective(filePath, cursor, text, lineStarts, knownFilePaths),
-    );
-  } while (cursor.nextSibling());
-
-  cursor.parent();
-  return directives;
+  return { declaredAccounts, declaredCommodities, includeDirectives, prices, transactions };
 }
 
 function extractIncludeDirective(
@@ -486,34 +491,6 @@ function lineNumberAt(position: number, starts: number[]) {
   }
 
   return starts.length;
-}
-
-function extractTransactions(
-  tree: ReturnType<typeof hledgerParser.parse>,
-  text: string,
-  lineStarts: number[],
-) {
-  const transactions: ParsedLedgerTransaction[] = [];
-  const cursor = tree.cursor();
-
-  if (!cursor.firstChild()) {
-    return transactions;
-  }
-
-  do {
-    if (cursor.type.name !== 'Transaction') {
-      continue;
-    }
-
-    const transaction = extractTransaction(cursor, text, lineStarts);
-
-    if (transaction) {
-      transactions.push(transaction);
-    }
-  } while (cursor.nextSibling());
-
-  cursor.parent();
-  return transactions;
 }
 
 function extractTransaction(
@@ -1105,4 +1082,88 @@ function createParserDiagnostic(
     severity: 'error',
     source: 'parser',
   };
+}
+
+function parseLedgerTree(
+  content: string,
+  previousContent?: string,
+  previousTree?: Tree,
+) {
+  if (!previousTree || previousContent == null) {
+    return hledgerParser.parse(content);
+  }
+
+  const fragments = TreeFragment.applyChanges(
+    TreeFragment.addTree(previousTree),
+    computeChangedRanges(previousContent, content),
+  );
+
+  return hledgerParser.parse(content, fragments);
+}
+
+function computeChangedRanges(previousContent: string, nextContent: string) {
+  if (previousContent === nextContent) {
+    return [];
+  }
+
+  const maxPrefix = Math.min(previousContent.length, nextContent.length);
+  let prefixLength = 0;
+
+  while (
+    prefixLength < maxPrefix &&
+    previousContent.charCodeAt(prefixLength) === nextContent.charCodeAt(prefixLength)
+  ) {
+    prefixLength += 1;
+  }
+
+  let previousEnd = previousContent.length;
+  let nextEnd = nextContent.length;
+
+  while (
+    previousEnd > prefixLength &&
+    nextEnd > prefixLength &&
+    previousContent.charCodeAt(previousEnd - 1) === nextContent.charCodeAt(nextEnd - 1)
+  ) {
+    previousEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  return [
+    {
+      fromA: prefixLength,
+      fromB: prefixLength,
+      toA: previousEnd,
+      toB: nextEnd,
+    },
+  ];
+}
+
+function extractDeclaredCommodity(argument: string) {
+  const trimmed = argument.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const quotedMatch = trimmed.match(/^"[^"\n]+"/);
+
+  if (quotedMatch) {
+    return quotedMatch[0];
+  }
+
+  const leadingMatch = trimmed.match(/^[^\s\d,+-]+/);
+
+  if (leadingMatch) {
+    return leadingMatch[0];
+  }
+
+  const trailingQuotedMatch = trimmed.match(/"[^"\n]+"$/);
+
+  if (trailingQuotedMatch) {
+    return trailingQuotedMatch[0];
+  }
+
+  const trailingMatch = trimmed.match(/[^\s\d,+-]+$/);
+
+  return trailingMatch?.[0] ?? null;
 }
