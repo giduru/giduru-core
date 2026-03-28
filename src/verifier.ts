@@ -252,7 +252,7 @@ function buildVerificationPlan(
     declaredAccounts,
     declaredCommodities,
     dependencyEdges,
-    directivePrices,
+    directivePrices: directivePrices.sort(comparePrices),
     graph: {
       dependencyEdges: [...dependencyEdges].sort(compareDependencyEdges),
       includedFiles: Array.from(includedFiles).sort((left, right) => left.localeCompare(right)),
@@ -451,9 +451,10 @@ function materializeLedgerAnalysis(
 ): LedgerAnalysis {
   const accounts = new Set<string>();
   const diagnostics = [...plan.baseDiagnostics];
-  const prices = [...plan.directivePrices];
-  const register: RegisterEntry[] = [];
-  const transactions: Transaction[] = [];
+  const postingPrices: LedgerPrice[] = [];
+  const registerByDate = new Map<string, RegisterEntry[]>();
+  const transactionDates = new Set<string>();
+  const transactionsByDate = new Map<string, Transaction[]>();
 
   for (const fragment of fragments) {
     for (const account of fragment.accounts) {
@@ -461,17 +462,22 @@ function materializeLedgerAnalysis(
     }
 
     diagnostics.push(...fragment.diagnostics);
-    prices.push(...fragment.prices);
-    register.push(...fragment.register);
+    postingPrices.push(...fragment.prices);
 
     if (fragment.transaction) {
-      transactions.push(fragment.transaction);
+      appendDateEntries(registerByDate, fragment.transaction.date, fragment.register);
+      appendDateEntries(transactionsByDate, fragment.transaction.date, [fragment.transaction]);
+      transactionDates.add(fragment.transaction.date);
     }
   }
 
   const sortedDiagnostics = diagnostics.sort(compareDiagnostics);
-  const sortedRegister = register.sort(compareRegisterEntries);
-  const sortedTransactions = transactions.sort(compareTransactions);
+  const sortedDatesDescending = Array.from(transactionDates).sort((left, right) =>
+    right.localeCompare(left),
+  );
+  const sortedRegister = materializeEntriesByDate(sortedDatesDescending, registerByDate);
+  const sortedTransactions = materializeEntriesByDate(sortedDatesDescending, transactionsByDate);
+  const sortedPrices = mergeSortedPrices(plan.directivePrices, postingPrices);
 
   return {
     accounts: Array.from(accounts).sort((left, right) => left.localeCompare(right)),
@@ -509,13 +515,7 @@ function materializeLedgerAnalysis(
       nodeCount: workspace.files.reduce((total, file) => total + file.stats.nodeCount, 0),
       reusedFileCount: workspace.reusedFileCount,
     },
-    prices: prices.sort((left, right) => {
-      if (left.date === right.date) {
-        return left.id.localeCompare(right.id);
-      }
-
-      return left.date.localeCompare(right.date);
-    }),
+    prices: sortedPrices,
     register: sortedRegister,
     summary: {
       postingCount: plan.postingCount,
@@ -1508,6 +1508,14 @@ function compareTransactions(left: Transaction, right: Transaction) {
   return right.date.localeCompare(left.date);
 }
 
+function comparePrices(left: LedgerPrice, right: LedgerPrice) {
+  if (left.date === right.date) {
+    return left.id.localeCompare(right.id);
+  }
+
+  return left.date.localeCompare(right.date);
+}
+
 function hasLedgerExtension(path: string) {
   const name = path.split('/').pop() ?? '';
   const dotIndex = name.lastIndexOf('.');
@@ -1632,6 +1640,81 @@ function createTransactionDescriptorKey(
   descriptor: LedgerVerificationTransactionDescriptor,
 ) {
   return `${descriptor.transactionId}\n${descriptor.fingerprint}`;
+}
+
+function appendDateEntries<T>(
+  entriesByDate: Map<string, T[]>,
+  date: string,
+  entries: T[],
+) {
+  if (entries.length === 0) {
+    return;
+  }
+
+  const existingEntries = entriesByDate.get(date);
+
+  if (existingEntries) {
+    existingEntries.push(...entries);
+    return;
+  }
+
+  entriesByDate.set(date, [...entries]);
+}
+
+function materializeEntriesByDate<T>(
+  sortedDatesDescending: string[],
+  entriesByDate: Map<string, T[]>,
+) {
+  const entries: T[] = [];
+
+  for (const date of sortedDatesDescending) {
+    entries.push(...(entriesByDate.get(date) ?? []));
+  }
+
+  return entries;
+}
+
+function mergeSortedPrices(
+  left: LedgerPrice[],
+  right: LedgerPrice[],
+) {
+  if (left.length === 0) {
+    return [...right];
+  }
+
+  if (right.length === 0) {
+    return [...left];
+  }
+
+  const merged: LedgerPrice[] = [];
+  let leftIndex = 0;
+  let rightIndex = 0;
+
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftPrice = left[leftIndex];
+    const rightPrice = right[rightIndex];
+
+    if (comparePrices(leftPrice, rightPrice) <= 0) {
+      merged.push(leftPrice);
+      leftIndex += 1;
+      continue;
+    }
+
+    merged.push(rightPrice);
+    rightIndex += 1;
+  }
+
+  while (leftIndex < left.length) {
+    merged.push(left[leftIndex]);
+    leftIndex += 1;
+  }
+
+  while (rightIndex < right.length) {
+    merged.push(right[rightIndex]);
+    rightIndex += 1;
+  }
+
+  return merged;
 }
 
 function buildTransactionFingerprint(path: string, transaction: ParsedLedgerTransaction) {

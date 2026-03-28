@@ -60,6 +60,10 @@ export async function applyLedgerDocumentChanges(
   changes: LedgerDocumentChange[],
   options: ApplyLedgerDocumentChangesOptions = {},
 ): Promise<LedgerEngineState> {
+  if (changes.length === 0) {
+    return state;
+  }
+
   const documentsByPath = new Map(state.documentsByPath);
   const parsedFilesByPath = new Map(state.parsedFilesByPath);
   const previousParseCaches = PARSE_CACHES_BY_STATE.get(state) ?? new Map();
@@ -123,6 +127,10 @@ export async function applyLedgerDocumentChanges(
     }
   }
 
+  if (changedPaths.size === 0 && !knownPathSetChanged) {
+    return state;
+  }
+
   const knownFilePaths = Array.from(documentsByPath.keys()).sort((left, right) =>
     left.localeCompare(right),
   );
@@ -177,7 +185,12 @@ export async function applyLedgerDocumentChanges(
   };
 
   PARSE_CACHES_BY_STATE.set(nextState, parseCachesByPath);
-  ANALYSIS_RESULTS_BY_STATE.set(nextState, new Map());
+  ANALYSIS_RESULTS_BY_STATE.set(
+    nextState,
+    orderedTargets.length === 0 && !knownPathSetChanged
+      ? new Map(ANALYSIS_RESULTS_BY_STATE.get(state) ?? [])
+      : new Map(),
+  );
   return nextState;
 }
 
