@@ -77,3 +77,27 @@ This is a deliberate deviation from order-sensitive reader behavior upstream.
 - alias/apply-account and other imperative directive semantics
 
 Those gaps are now isolated to the package instead of being mixed into app services.
+
+## Benchmarks
+
+Run the package benchmark harness with:
+
+```sh
+npm run bench -- --preset medium
+```
+
+Supported flags:
+
+- `--preset small|medium|large`
+- `--iterations N`
+- `--warmup N`
+- `--filter substring`
+- `--json`
+
+The harness covers:
+
+- large single-file simple journals
+- large single-file priced journals
+- deep static include graphs
+- glob-included workspaces
+- incremental leaf edits, file additions, and file deletions
