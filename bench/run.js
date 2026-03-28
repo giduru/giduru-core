@@ -513,6 +513,7 @@ async function runStateAnalysis(baseState, rootFilePath) {
       wallMs: performance.now() - startedAt,
     }),
     parseMs: 0,
+    verifyMs: 0,
   };
 }
 

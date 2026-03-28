@@ -19,6 +19,10 @@ const PARSE_CACHES_BY_STATE = new WeakMap<
   LedgerEngineState,
   Map<string, LedgerDocumentParseCache>
 >();
+const ANALYSIS_RESULTS_BY_STATE = new WeakMap<
+  LedgerEngineState,
+  Map<string, { analysis: LedgerAnalysis; workspace: ParsedLedgerWorkspace }>
+>();
 
 type ApplyLedgerDocumentChangesOptions = {
   onProgress?: (progress: ParseLedgerProgress) => void;
@@ -47,6 +51,7 @@ export function createLedgerEngineState(
   };
 
   PARSE_CACHES_BY_STATE.set(state, new Map());
+  ANALYSIS_RESULTS_BY_STATE.set(state, new Map());
   return state;
 }
 
@@ -172,6 +177,7 @@ export async function applyLedgerDocumentChanges(
   };
 
   PARSE_CACHES_BY_STATE.set(nextState, parseCachesByPath);
+  ANALYSIS_RESULTS_BY_STATE.set(nextState, new Map());
   return nextState;
 }
 
@@ -204,6 +210,13 @@ export function analyzeLedgerState(
   state: LedgerEngineState,
   options: AnalyzeLedgerStateOptions,
 ) {
+  const analysisCacheKey = createAnalysisCacheKey(options);
+  const cachedResult = ANALYSIS_RESULTS_BY_STATE.get(state)?.get(analysisCacheKey);
+
+  if (cachedResult) {
+    return { ...cachedResult, state };
+  }
+
   const workspace = buildParsedLedgerWorkspace(state, {
     rootFilePaths: options.rootFilePaths,
   });
@@ -214,6 +227,14 @@ export function analyzeLedgerState(
   );
   const nextState =
     state.verificationCache === cache ? state : { ...state, verificationCache: cache };
+  const parseCachesByPath = PARSE_CACHES_BY_STATE.get(state);
+
+  if (nextState !== state && parseCachesByPath) {
+    PARSE_CACHES_BY_STATE.set(nextState, parseCachesByPath);
+    ANALYSIS_RESULTS_BY_STATE.set(nextState, new Map());
+  }
+
+  ANALYSIS_RESULTS_BY_STATE.get(nextState)?.set(analysisCacheKey, { analysis, workspace });
 
   return { analysis, state: nextState, workspace };
 }
@@ -254,6 +275,18 @@ export async function analyzeLedgerDocuments(
   );
   state.verificationCache = cache;
   PARSE_CACHES_BY_STATE.set(state, new Map(parseCachesByPath));
+  ANALYSIS_RESULTS_BY_STATE.set(
+    state,
+    new Map([
+      [
+        createAnalysisCacheKey({
+          availableFilePaths: options.verifyOptions?.availableFilePaths,
+          rootFilePaths: options.verifyOptions?.rootFilePaths ?? options.rootFilePaths,
+        }),
+        { analysis, workspace: parsedWorkspace },
+      ],
+    ]),
+  );
 
   return {
     analysis,
@@ -296,4 +329,18 @@ function normalizeDocument(document: LedgerSourceDocument): LedgerSourceDocument
     ...document,
     name: document.name || basename(document.path),
   };
+}
+
+function createAnalysisCacheKey(options: AnalyzeLedgerStateOptions) {
+  const availableFilePaths = Array.from(new Set(options.availableFilePaths ?? [])).sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const rootFilePaths = Array.from(new Set(options.rootFilePaths ?? [])).sort((left, right) =>
+    left.localeCompare(right),
+  );
+
+  return JSON.stringify({
+    availableFilePaths,
+    rootFilePaths,
+  });
 }

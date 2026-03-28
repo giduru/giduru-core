@@ -40,6 +40,7 @@ type VerificationRuntimeState = {
 type LedgerVerificationPlan = {
   accountDeclarationSignature: string;
   baseDiagnostics: LedgerDiagnostic[];
+  commodityDeclarationSignature: string;
   declaredAccounts: Set<string>;
   declaredCommodities: Set<string>;
   dependencyEdges: Array<{ from: string; to: string }>;
@@ -77,21 +78,31 @@ export function verifyLedgerWorkspaceWithCache(
   const fragments = previousCache?.fragments.slice(0, reusablePrefixLength) ?? [];
   const checkpoints = cloneReusableCheckpoints(previousCache, reusablePrefixLength);
   const runtimeState = restoreRuntimeStateFromCache(previousCache, reusablePrefixLength);
+  const previousReusableFragments = buildReusableFragmentLookup(previousCache, plan);
 
   for (let index = reusablePrefixLength; index < plan.orderedTransactions.length; index += 1) {
     const descriptor = plan.orderedTransactions[index];
-    const fragment = verifyTransactionFragment({
-      declaredAccounts: plan.declaredAccounts,
-      declaredCommodities: plan.declaredCommodities,
-      hasAccountDeclarations: plan.hasAccountDeclarations,
-      hasCommodityDeclarations: plan.hasCommodityDeclarations,
-      parsedFile: descriptor.parsedFile,
-      runtimeState,
-      transaction: descriptor.transaction,
-      transactionId: descriptor.transactionId,
-    });
+    const reusableFragment = previousReusableFragments.get(
+      createTransactionDescriptorKey(descriptor),
+    );
+    const fragment = reusableFragment
+      ? reusableFragment.fragment
+      : verifyTransactionFragment({
+          declaredAccounts: plan.declaredAccounts,
+          declaredCommodities: plan.declaredCommodities,
+          hasAccountDeclarations: plan.hasAccountDeclarations,
+          hasCommodityDeclarations: plan.hasCommodityDeclarations,
+          parsedFile: descriptor.parsedFile,
+          runtimeState,
+          transaction: descriptor.transaction,
+          transactionId: descriptor.transactionId,
+        });
 
     fragments[index] = fragment;
+
+    if (reusableFragment) {
+      applyBalanceDeltas(runtimeState, fragment.balanceDeltas);
+    }
 
     if (
       (index + 1) % CHECKPOINT_INTERVAL === 0 ||
@@ -109,7 +120,7 @@ export function verifyLedgerWorkspaceWithCache(
     cache: {
       accountDeclarationSignature: plan.accountDeclarationSignature,
       checkpoints,
-      commodityDeclarationSignature: buildDeclarationSignature(plan.declaredCommodities),
+      commodityDeclarationSignature: plan.commodityDeclarationSignature,
       fragments,
       orderedTransactions: plan.orderedTransactions,
     },
@@ -237,6 +248,7 @@ function buildVerificationPlan(
   return {
     accountDeclarationSignature: buildDeclarationSignature(declaredAccounts),
     baseDiagnostics,
+    commodityDeclarationSignature: buildDeclarationSignature(declaredCommodities),
     declaredAccounts,
     declaredCommodities,
     dependencyEdges,
@@ -264,7 +276,7 @@ function getReusablePrefixLength(
 
   if (
     previousCache.accountDeclarationSignature !== plan.accountDeclarationSignature ||
-    previousCache.commodityDeclarationSignature !== buildDeclarationSignature(plan.declaredCommodities)
+    previousCache.commodityDeclarationSignature !== plan.commodityDeclarationSignature
   ) {
     return 0;
   }
@@ -335,6 +347,43 @@ function restoreRuntimeStateFromCache(
   }
 
   return runtimeState;
+}
+
+function buildReusableFragmentLookup(
+  previousCache: LedgerVerificationCache | null,
+  plan: LedgerVerificationPlan,
+) {
+  const reusable = new Map<
+    string,
+    {
+      fragment: LedgerVerificationFragment;
+      index: number;
+    }
+  >();
+
+  if (
+    !previousCache ||
+    previousCache.accountDeclarationSignature !== plan.accountDeclarationSignature ||
+    previousCache.commodityDeclarationSignature !== plan.commodityDeclarationSignature
+  ) {
+    return reusable;
+  }
+
+  for (let index = 0; index < previousCache.orderedTransactions.length; index += 1) {
+    const descriptor = previousCache.orderedTransactions[index];
+    const fragment = previousCache.fragments[index];
+
+    if (!fragment || fragment.dependsOnPriorBalances) {
+      continue;
+    }
+
+    reusable.set(createTransactionDescriptorKey(descriptor), {
+      fragment,
+      index,
+    });
+  }
+
+  return reusable;
 }
 
 function findBestCheckpoint(
@@ -503,6 +552,7 @@ function verifyTransactionFragment(args: {
   } = args;
   const accounts = new Set<string>();
   const balanceDeltas: LedgerVerificationBalanceDelta[] = [];
+  const dependsOnPriorBalances = transaction.postings.some((posting) => posting.balanceAssertion);
   const diagnostics: LedgerDiagnostic[] = [];
   const prices: LedgerPrice[] = [];
   const register: RegisterEntry[] = [];
@@ -656,6 +706,7 @@ function verifyTransactionFragment(args: {
   return {
     accounts: Array.from(accounts),
     balanceDeltas,
+    dependsOnPriorBalances,
     diagnostics,
     postingCount: transaction.postings.length,
     prices,
@@ -928,15 +979,12 @@ function applyPostingEntry(args: {
 
   register.push(entry);
   transactionEntries.push(entry);
-
-  const delta = {
+  balanceDeltas.push({
     account: posting.account,
     amount: posting.amount,
     commodity: posting.commodity,
-  };
-
-  balanceDeltas.push(delta);
-  applyBalanceDelta(runtimeState, delta);
+  });
+  applyBalanceDelta(runtimeState, balanceDeltas[balanceDeltas.length - 1]);
 
   if (targetTotals) {
     const balancingAmount = getPostingBalancingAmount(posting);
@@ -1578,6 +1626,12 @@ function appendIndexId(
 
 function buildDeclarationSignature(values: Set<string>) {
   return Array.from(values).sort((left, right) => left.localeCompare(right)).join('\n');
+}
+
+function createTransactionDescriptorKey(
+  descriptor: LedgerVerificationTransactionDescriptor,
+) {
+  return `${descriptor.transactionId}\n${descriptor.fingerprint}`;
 }
 
 function buildTransactionFingerprint(path: string, transaction: ParsedLedgerTransaction) {

@@ -138,6 +138,7 @@ export type LedgerVerificationTransactionDescriptor = {
 export type LedgerVerificationFragment = {
   accounts: string[];
   balanceDeltas: LedgerVerificationBalanceDelta[];
+  dependsOnPriorBalances: boolean;
   diagnostics: LedgerDiagnostic[];
   postingCount: number;
   prices: LedgerPrice[];
