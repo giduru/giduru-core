@@ -305,6 +305,17 @@ function verifyTransaction(args: {
   const transactionEntries: RegisterEntry[] = [];
   const realTotals: CommodityTotals = new Map();
   const balancedVirtualTotals: CommodityTotals = new Map();
+  const originalCommodityPrecisions = collectOriginalCommodityPrecisions(transaction.postings);
+  const realCommodityPrecisions = collectBalancingCommodityPrecisions(
+    transaction.postings,
+    'real',
+    originalCommodityPrecisions,
+  );
+  const balancedVirtualCommodityPrecisions = collectBalancingCommodityPrecisions(
+    transaction.postings,
+    'balanced-virtual',
+    originalCommodityPrecisions,
+  );
   const pendingReal: PendingPosting[] = [];
   const pendingBalancedVirtual: PendingPosting[] = [];
 
@@ -384,6 +395,7 @@ function verifyTransaction(args: {
 
   resolvePendingPostings({
     balances,
+    commodityPrecisions: realCommodityPrecisions,
     diagnostics,
     kind: 'real',
     parsedFile,
@@ -398,6 +410,7 @@ function verifyTransaction(args: {
   });
   resolvePendingPostings({
     balances,
+    commodityPrecisions: balancedVirtualCommodityPrecisions,
     diagnostics,
     kind: 'balanced-virtual',
     parsedFile,
@@ -412,6 +425,7 @@ function verifyTransaction(args: {
   });
 
   assertTransactionTotals(
+    realCommodityPrecisions,
     diagnostics,
     parsedFile.file.path,
     realTotals,
@@ -420,6 +434,7 @@ function verifyTransaction(args: {
     transaction.headerLine,
   );
   assertTransactionTotals(
+    balancedVirtualCommodityPrecisions,
     diagnostics,
     parsedFile.file.path,
     balancedVirtualTotals,
@@ -457,6 +472,7 @@ function verifyTransaction(args: {
 
 function resolvePendingPostings(args: {
   balances: Map<string, number>;
+  commodityPrecisions: Map<string, number>;
   diagnostics: LedgerDiagnostic[];
   kind: 'balanced-virtual' | 'real';
   parsedFile: ParsedLedgerFile;
@@ -471,6 +487,7 @@ function resolvePendingPostings(args: {
 }) {
   const {
     balances,
+    commodityPrecisions,
     diagnostics,
     kind,
     parsedFile,
@@ -501,9 +518,45 @@ function resolvePendingPostings(args: {
   }
 
   const [pendingPosting] = pending;
-  const nonZeroTotals = nonZeroCommodityEntries(targetTotals);
+  const nonZeroTotals = significantCommodityEntries(targetTotals, commodityPrecisions);
+  const totalEntries = Array.from(targetTotals.entries());
 
   if (nonZeroTotals.length === 0) {
+    if (totalEntries.length === 1) {
+      const [inferredCommodity] = totalEntries[0];
+
+      applyPostingEntry({
+        balances,
+        parsedFile,
+        posting: {
+          ...pendingPosting.posting,
+          amount: 0,
+          commodity: inferredCommodity,
+        },
+        prices,
+        register,
+        runningBalances,
+        targetTotals,
+        transaction,
+        transactionEntries,
+        transactionId,
+        wasInferred: true,
+      });
+      return;
+    }
+
+    if (totalEntries.length > 1) {
+      diagnostics.push(
+        createDiagnostic(
+          parsedFile.file.path,
+          `Transaction "${transaction.description || transaction.date}" cannot infer a missing amount across multiple commodities.`,
+          transaction.headerLine,
+          'error',
+        ),
+      );
+      return;
+    }
+
     diagnostics.push(
       createDiagnostic(
         parsedFile.file.path,
@@ -671,7 +724,8 @@ function applyPostingEntry(args: {
   addToRunningBalances(runningBalances, posting.account, posting.commodity, posting.amount);
 
   if (targetTotals) {
-    addToCommodityTotals(targetTotals, posting.commodity, posting.amount);
+    const balancingAmount = getPostingBalancingAmount(posting);
+    addToCommodityTotals(targetTotals, balancingAmount.commodity, balancingAmount.amount);
   }
 
   const price = derivePostingAnnotationPrice(parsedFile.file.path, transaction, posting);
@@ -790,6 +844,50 @@ function totalsForPostingKind(
   return null;
 }
 
+function collectOriginalCommodityPrecisions(postings: ParsedLedgerPosting[]) {
+  const precisions = new Map<string, number>();
+
+  for (const posting of postings) {
+    if (posting.amount == null || posting.commodity == null || posting.amountPrecision == null) {
+      continue;
+    }
+
+    updateCommodityPrecision(precisions, posting.commodity, posting.amountPrecision);
+  }
+
+  return precisions;
+}
+
+function collectBalancingCommodityPrecisions(
+  postings: ParsedLedgerPosting[],
+  kind: ParsedLedgerPosting['kind'],
+  originalCommodityPrecisions: Map<string, number>,
+) {
+  const precisions = new Map<string, number>();
+
+  for (const posting of postings) {
+    if (posting.kind !== kind || posting.amount == null) {
+      continue;
+    }
+
+    const balancingAmount = getPostingBalancingAmount(
+      posting as ParsedLedgerPosting & { amount: number },
+    );
+    const precision =
+      originalCommodityPrecisions.get(balancingAmount.commodity) ??
+      getPostingBalancingPrecision(posting) ??
+      null;
+
+    if (precision == null) {
+      continue;
+    }
+
+    updateCommodityPrecision(precisions, balancingAmount.commodity, precision);
+  }
+
+  return precisions;
+}
+
 function addToRunningBalances(
   runningBalances: AccountBalanceMap,
   account: string,
@@ -849,7 +947,70 @@ function nonZeroCommodityEntries(totals: CommodityTotals) {
   return Array.from(totals.entries()).filter(([, amount]) => Math.abs(amount) > BALANCE_EPSILON);
 }
 
+function significantCommodityEntries(
+  totals: CommodityTotals,
+  commodityPrecisions: Map<string, number>,
+) {
+  return Array.from(totals.entries()).filter(
+    ([commodity, amount]) => !looksZeroAtCommodityPrecision(amount, commodityPrecisions.get(commodity)),
+  );
+}
+
+function looksZeroAtCommodityPrecision(amount: number, precision: number | undefined) {
+  if (precision == null) {
+    return Math.abs(amount) <= BALANCE_EPSILON;
+  }
+
+  return Math.abs(amount) <= 0.5 * 10 ** -precision + BALANCE_EPSILON;
+}
+
+function updateCommodityPrecision(
+  precisions: Map<string, number>,
+  commodity: string,
+  precision: number,
+) {
+  const current = precisions.get(commodity);
+
+  if (current == null || precision > current) {
+    precisions.set(commodity, precision);
+  }
+}
+
+function getPostingBalancingAmount(
+  posting: ParsedLedgerPosting & { amount: number },
+) {
+  const annotation = posting.priceAnnotation;
+
+  if (!annotation?.commodity) {
+    return {
+      amount: posting.amount,
+      commodity: posting.commodity ?? '',
+    };
+  }
+
+  if (annotation.kind === 'total') {
+    return {
+      amount: annotation.amount,
+      commodity: annotation.commodity,
+    };
+  }
+
+  return {
+    amount: posting.amount * annotation.amount,
+    commodity: annotation.commodity,
+  };
+}
+
+function getPostingBalancingPrecision(posting: ParsedLedgerPosting) {
+  if (posting.priceAnnotation?.commodity) {
+    return posting.priceAnnotation.precision;
+  }
+
+  return posting.amountPrecision;
+}
+
 function assertTransactionTotals(
+  commodityPrecisions: Map<string, number>,
   diagnostics: LedgerDiagnostic[],
   path: string,
   totals: CommodityTotals,
@@ -857,7 +1018,7 @@ function assertTransactionTotals(
   label: string,
   line: number,
 ) {
-  const nonZeroTotals = nonZeroCommodityEntries(totals);
+  const nonZeroTotals = significantCommodityEntries(totals, commodityPrecisions);
 
   if (nonZeroTotals.length === 0) {
     return;

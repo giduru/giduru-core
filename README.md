@@ -63,7 +63,7 @@ This is a deliberate deviation from order-sensitive reader behavior upstream.
 - include directives, including glob expansion and unmatched-glob diagnostics
 - declared account and commodity strictness
 - missing-amount inference
-- posting price annotations surfaced as derived prices
+- posting price annotations used for balancing and surfaced as derived prices
 - posting kinds: real, virtual, balanced virtual
 - balance assertions and simple balance assignments
 - separate balancing for real vs balanced-virtual posting groups

@@ -53,6 +53,7 @@ export type ParsedLedgerBalanceAssertion = {
 export type ParsedLedgerPosting = {
   account: string;
   amount: null | number;
+  amountPrecision: null | number;
   balanceAssertion: null | ParsedLedgerBalanceAssertion;
   comment: string;
   commodity: null | string;
@@ -62,6 +63,7 @@ export type ParsedLedgerPosting = {
     amount: number;
     commodity: null | string;
     kind: 'total' | 'unit';
+    precision: null | number;
   };
   tags: LedgerTag[];
 };

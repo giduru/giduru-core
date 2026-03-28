@@ -68,6 +68,149 @@ test('missing amounts are inferred inside the real-posting balance group', async
   assert.equal(inferred.inferredAmount, true);
 });
 
+test('missing amounts can infer zero when balancing against a single zero commodity total', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2015-01-26 * opening balances ; account open
+  assets:bank:td:checking_4506  CAD 0.00
+  equity:opening-balances
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const inferred = analysis.register.find((entry) => entry.account === 'equity:opening-balances');
+  assert.ok(inferred);
+  assert.equal(inferred.amount, 0);
+  assert.equal(inferred.commodity, 'CAD');
+  assert.equal(inferred.inferredAmount, true);
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('there is nothing to balance against'),
+    ),
+    false,
+  );
+});
+
+test('priced postings balance against their cost commodity totals', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2024-01-12 Buy 3.9492 VEQT @ CAD 36.8122
+  assets:investment:ws:fhsa  3.9492 VEQT @ CAD 36.8122
+  assets:investment:ws:fhsa  CAD -145.38
+
+2024-02-14 Buy 12.00 VEQT @ CAD 38.05
+  assets:investment:ws:fhsa  12.00 VEQT @ CAD 38.05
+  assets:investment:ws:fhsa  CAD -456.60
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('Automatic commodity conversion is not enabled'),
+    ),
+    false,
+  );
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('does not balance'),
+    ),
+    false,
+  );
+});
+
+test('total price annotations are used for balancing', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2024-01-01
+  a  1 USD @@ 1 EUR
+  a  -2 USD @@ -1 EUR
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('does not balance'),
+    ),
+    false,
+  );
+});
+
+test('total price annotations inherit the posting sign for balancing', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2025-03-03 FX reconciliation: TFSA USD→CAD transfer
+  equity:virtual:ws:internal_transfer  USD -899.22 @@ CAD 1,273.15
+  equity:virtual:ws:internal_transfer  CAD 1,273.15
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('does not balance for CAD'),
+    ),
+    false,
+  );
+});
+
 test('simple balance assignments are inferred from assertions', async () => {
   const documents = new Map([
     [
@@ -226,6 +369,42 @@ test('undeclared commodities are reported from commodity directives', async () =
       diagnostic.message.includes('Undeclared commodity "EUR"'),
     ),
     true,
+  );
+});
+
+test('quoted commodity directives declare quoted posting commodities', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `commodity USD 1.00
+commodity "HSUV.U"
+
+2024-03-01 Buy
+  Assets:Investment:WS:NonRegisteredUSD  230.00 "HSUV.U" @ USD 108.67
+  Assets:Investment:WS:NonRegisteredUSD  USD -24994.10
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  assert.equal(analysis.declaredCommodities.includes('"HSUV.U"'), true);
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('Undeclared commodity ""HSUV.U""'),
+    ),
+    false,
   );
 });
 

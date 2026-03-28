@@ -223,10 +223,10 @@ function extractDirectives(
         do {
           if ((cursor.type.name as string) === 'DirectiveArgument') {
             const argument = text.slice(cursor.from, cursor.to).trim();
-            const match = argument.match(/^([^\s\d.,]+)/);
+            const commodity = extractDeclaredCommodity(argument);
 
-            if (match) {
-              declaredCommodities.push(match[1]);
+            if (commodity) {
+              declaredCommodities.push(commodity);
             }
           }
         } while (cursor.nextSibling());
@@ -247,6 +247,36 @@ function extractDirectives(
 
   cursor.parent();
   return { declaredAccounts, declaredCommodities, prices };
+}
+
+function extractDeclaredCommodity(argument: string) {
+  const trimmed = argument.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const quotedMatch = trimmed.match(/^"[^"\n]+"/);
+
+  if (quotedMatch) {
+    return quotedMatch[0];
+  }
+
+  const leadingMatch = trimmed.match(/^[^\s\d,+-]+/);
+
+  if (leadingMatch) {
+    return leadingMatch[0];
+  }
+
+  const trailingQuotedMatch = trimmed.match(/"[^"\n]+"$/);
+
+  if (trailingQuotedMatch) {
+    return trailingQuotedMatch[0];
+  }
+
+  const trailingMatch = trimmed.match(/[^\s\d,+-]+$/);
+
+  return trailingMatch?.[0] ?? null;
 }
 
 function extractIncludeDirectives(
@@ -608,7 +638,7 @@ function extractPosting(
 ) {
   let account = '';
   let kind: ParsedLedgerPosting['kind'] = 'real';
-  let amount: null | { commodity: null | string; value: number } = null;
+  let amount: null | { commodity: null | string; precision: number; value: number } = null;
   let balanceAssertion: ParsedLedgerPosting['balanceAssertion'] = null;
   const commentLines: string[] = [];
   let priceAnnotation: ParsedLedgerPosting['priceAnnotation'] = null;
@@ -636,7 +666,8 @@ function extractPosting(
     }
 
     if (cursor.type.name === 'PostingAnnotation') {
-      priceAnnotation = extractPostingPriceAnnotation(cursor, text) ?? priceAnnotation;
+      priceAnnotation =
+        extractPostingPriceAnnotation(cursor, text, amount?.value ?? null) ?? priceAnnotation;
       balanceAssertion =
         extractPostingBalanceAssertion(cursor, text) ?? balanceAssertion;
     }
@@ -651,6 +682,7 @@ function extractPosting(
   return {
     account,
     amount: amount?.value ?? null,
+    amountPrecision: amount?.precision ?? null,
     balanceAssertion,
     commentLines,
     commodity: amount?.commodity ?? null,
@@ -736,8 +768,28 @@ function extractAmount(
 
   return {
     commodity: commodityPrefix ?? commoditySuffix ?? '',
+    precision: inferNumericDisplayPrecision(numberText),
     value: numericValue,
   };
+}
+
+function inferNumericDisplayPrecision(numberText: string) {
+  const compact = numberText.replaceAll(' ', '');
+  const lastDot = compact.lastIndexOf('.');
+  const lastComma = compact.lastIndexOf(',');
+  const separatorIndex = Math.max(lastDot, lastComma);
+
+  if (separatorIndex < 0) {
+    return 0;
+  }
+
+  const digitsAfterSeparator = compact.length - separatorIndex - 1;
+
+  if (digitsAfterSeparator <= 0) {
+    return 0;
+  }
+
+  return digitsAfterSeparator;
 }
 
 function extractPriceDirective(
@@ -809,6 +861,7 @@ function extractPriceDirective(
 function extractPostingPriceAnnotation(
   cursor: TreeCursor,
   text: string,
+  postingAmount: null | number,
 ): ParsedLedgerPosting['priceAnnotation'] {
   if (!cursor.firstChild()) {
     return null;
@@ -834,10 +887,14 @@ function extractPostingPriceAnnotation(
     }
 
     if (amount) {
+      const normalizedAmount =
+        kind === 'total' ? normalizeTotalPriceAmount(amount.value, postingAmount) : amount.value;
+
       annotation = {
-        amount: amount.value,
+        amount: normalizedAmount,
         commodity: amount.commodity || null,
         kind,
+        precision: amount.precision,
       };
     }
 
@@ -846,6 +903,17 @@ function extractPostingPriceAnnotation(
 
   cursor.parent();
   return annotation;
+}
+
+function normalizeTotalPriceAmount(
+  totalPriceAmount: number,
+  postingAmount: null | number,
+) {
+  if (postingAmount == null || postingAmount === 0) {
+    return totalPriceAmount;
+  }
+
+  return Math.sign(postingAmount) * Math.abs(totalPriceAmount);
 }
 
 function extractPostingBalanceAssertion(
