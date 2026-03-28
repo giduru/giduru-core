@@ -121,6 +121,45 @@ export type ParsedLedgerWorkspace = {
   totalParseMs: number;
 };
 
+export type LedgerVerificationBalanceDelta = {
+  account: string;
+  amount: number;
+  commodity: string;
+};
+
+export type LedgerVerificationTransactionDescriptor = {
+  fingerprint: string;
+  fileOrder: string;
+  parsedFile: ParsedLedgerFile;
+  transaction: ParsedLedgerTransaction;
+  transactionId: string;
+};
+
+export type LedgerVerificationFragment = {
+  accounts: string[];
+  balanceDeltas: LedgerVerificationBalanceDelta[];
+  diagnostics: LedgerDiagnostic[];
+  postingCount: number;
+  prices: LedgerPrice[];
+  register: RegisterEntry[];
+  transaction: null | Transaction;
+};
+
+export type LedgerVerificationCheckpoint = {
+  balances: Map<string, number>;
+  inclusiveRunningBalances: Map<string, Map<string, number>>;
+  runningBalances: Map<string, Map<string, number>>;
+  transactionIndex: number;
+};
+
+export type LedgerVerificationCache = {
+  accountDeclarationSignature: string;
+  checkpoints: LedgerVerificationCheckpoint[];
+  commodityDeclarationSignature: string;
+  fragments: LedgerVerificationFragment[];
+  orderedTransactions: LedgerVerificationTransactionDescriptor[];
+};
+
 export type ParseLedgerProgress = {
   completedFiles: number;
   currentPath: string;
@@ -268,4 +307,5 @@ export type LedgerEngineState = {
   documentsByPath: Map<string, LedgerSourceDocument>;
   lastUpdateStats: LedgerEngineUpdateStats;
   parsedFilesByPath: Map<string, ParsedLedgerFile>;
+  verificationCache: LedgerVerificationCache | null;
 };

@@ -1,6 +1,6 @@
 import { basename } from './path';
 import { parseLedgerDocument, parseLedgerWorkspace } from './parser';
-import { verifyLedgerWorkspace } from './verifier';
+import { verifyLedgerWorkspaceWithCache } from './verifier';
 import type {
   LedgerAnalysis,
   LedgerDocumentChange,
@@ -34,6 +34,7 @@ export function createLedgerEngineState(
       reusedFileCount: 0,
     },
     parsedFilesByPath: new Map(),
+    verificationCache: null,
   };
 }
 
@@ -143,6 +144,7 @@ export async function applyLedgerDocumentChanges(
       reusedFileCount: Math.max(parsedFilesByPath.size - orderedTargets.length, 0),
     },
     parsedFilesByPath,
+    verificationCache: state.verificationCache,
   };
 }
 
@@ -178,9 +180,15 @@ export function analyzeLedgerState(
   const workspace = buildParsedLedgerWorkspace(state, {
     rootFilePaths: options.rootFilePaths,
   });
-  const analysis = verifyLedgerWorkspace(workspace, options);
+  const { analysis, cache } = verifyLedgerWorkspaceWithCache(
+    workspace,
+    options,
+    state.verificationCache,
+  );
+  const nextState =
+    state.verificationCache === cache ? state : { ...state, verificationCache: cache };
 
-  return { analysis, workspace };
+  return { analysis, state: nextState, workspace };
 }
 
 export async function analyzeLedgerDocuments(
@@ -209,9 +217,15 @@ export async function analyzeLedgerDocuments(
     parseMs: parsedWorkspace.totalParseMs,
     reusedFileCount: parsedWorkspace.reusedFileCount,
   };
+  const { analysis, cache } = verifyLedgerWorkspaceWithCache(
+    parsedWorkspace,
+    options.verifyOptions,
+    null,
+  );
+  state.verificationCache = cache;
 
   return {
-    analysis: verifyLedgerWorkspace(parsedWorkspace, options.verifyOptions),
+    analysis,
     state,
     workspace: parsedWorkspace,
   };

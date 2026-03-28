@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { analyzeLedgerDocuments } from '../src';
+import {
+  analyzeLedgerDocuments,
+  analyzeLedgerState,
+  applyLedgerDocumentChanges,
+  createLedgerEngineState,
+} from '../src';
 
 test('declaration directives are order-insensitive', async () => {
   const documents = new Map([
@@ -475,4 +480,64 @@ test('search indexes are populated for register and transaction outputs', async 
     analysis.index.registerPositionById[cashIds[0] ?? 'missing'] >= 0,
     true,
   );
+});
+
+test('incremental analysis reuses unchanged verified prefixes after a later file edit', async () => {
+  let state = createLedgerEngineState();
+  const baseDocument = {
+    content: `2024-01-01 Opening
+  Assets:Cash  10 USD
+  Equity:OpeningBalances  -10 USD
+
+2024-01-02 Lunch
+  Expenses:Food  4 USD
+  Assets:Cash  -4 USD
+`,
+    isLedger: true,
+    name: 'main.journal',
+    path: 'main.journal',
+  };
+
+  state = await applyLedgerDocumentChanges(
+    state,
+    [{ document: baseDocument, type: 'upsert' }],
+  );
+
+  const firstRun = analyzeLedgerState(state, {
+    availableFilePaths: ['main.journal'],
+    rootFilePaths: ['main.journal'],
+  });
+  const firstCache = firstRun.state.verificationCache;
+
+  assert.ok(firstCache);
+  assert.equal(firstCache.fragments.length, 2);
+
+  state = await applyLedgerDocumentChanges(firstRun.state, [
+    {
+      document: {
+        ...baseDocument,
+        content: `2024-01-01 Opening
+  Assets:Cash  10 USD
+  Equity:OpeningBalances  -10 USD
+
+2024-01-02 Lunch
+  Expenses:Food  6 USD
+  Assets:Cash  -6 USD
+`,
+      },
+      type: 'upsert',
+    },
+  ]);
+
+  const secondRun = analyzeLedgerState(state, {
+    availableFilePaths: ['main.journal'],
+    rootFilePaths: ['main.journal'],
+  });
+  const secondCache = secondRun.state.verificationCache;
+
+  assert.ok(secondCache);
+  assert.equal(secondRun.analysis.diagnostics.length, 0);
+  assert.equal(secondRun.analysis.transactions.length, 2);
+  assert.strictEqual(secondCache.fragments[0], firstCache.fragments[0]);
+  assert.notStrictEqual(secondCache.fragments[1], firstCache.fragments[1]);
 });
