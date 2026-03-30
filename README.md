@@ -4,6 +4,14 @@ Pure parsing and verification engine extracted from Giduru's app runtime.
 
 Detailed architecture and performance notes live in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
+## Install
+
+```sh
+npm install @giduru/ledger-engine
+```
+
+This package is maintained from the [`giduru/giduru-core`](https://github.com/giduru/giduru-core) repository.
+
 ## Goals
 
 - Keep filesystem IO, React, Zustand, and runtime orchestration out of the core engine.
