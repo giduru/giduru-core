@@ -2,6 +2,8 @@
 
 Pure parsing and verification engine extracted from Giduru's app runtime.
 
+Detailed architecture and performance notes live in [ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Goals
 
 - Keep filesystem IO, React, Zustand, and runtime orchestration out of the core engine.
