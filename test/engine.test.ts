@@ -690,3 +690,63 @@ commodity USD
   assert.strictEqual(secondCache.fragments[0], firstCache.fragments[0]);
   assert.strictEqual(secondCache.fragments[1], firstCache.fragments[1]);
 });
+
+test('incremental analysis caches checkpoint-aligned replay blocks for long reusable suffixes', async () => {
+  let state = createLedgerEngineState();
+  const transactionCount = 260;
+  const content = Array.from({ length: transactionCount }, (_, index) => {
+    const amount = index + 1;
+    const day = String((index % 28) + 1).padStart(2, '0');
+
+    return `2024-01-${day} Txn ${index}
+  Assets:Cash  ${amount} USD
+  Equity:OpeningBalances  -${amount} USD`;
+  }).join('\n\n');
+  const baseDocument = {
+    content,
+    isLedger: true,
+    name: 'main.journal',
+    path: 'main.journal',
+  };
+
+  state = await applyLedgerDocumentChanges(
+    state,
+    [{ document: baseDocument, type: 'upsert' }],
+  );
+
+  const firstRun = analyzeLedgerState(state, {
+    availableFilePaths: ['main.journal'],
+    rootFilePaths: ['main.journal'],
+  });
+  const firstCache = firstRun.state.verificationCache;
+
+  assert.ok(firstCache);
+  assert.equal(
+    firstCache.replayBlocks.some((block) => block.startIndex === 128 && block.endIndex === 256),
+    true,
+  );
+
+  state = await applyLedgerDocumentChanges(firstRun.state, [
+    {
+      document: {
+        ...baseDocument,
+        content: content.replace('2024-01-11 Txn 10', '2024-01-11 Txn 10 updated'),
+      },
+      type: 'upsert',
+    },
+  ]);
+
+  const secondRun = analyzeLedgerState(state, {
+    availableFilePaths: ['main.journal'],
+    rootFilePaths: ['main.journal'],
+  });
+  const secondCache = secondRun.state.verificationCache;
+
+  assert.ok(secondCache);
+  assert.equal(secondRun.analysis.diagnostics.length, 0);
+  assert.strictEqual(secondCache.fragments[128], firstCache.fragments[128]);
+  assert.equal(
+    secondCache.replayBlocks.some((block) => block.startIndex === 128 && block.endIndex === 256),
+    true,
+  );
+});

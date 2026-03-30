@@ -155,6 +155,12 @@ export type LedgerVerificationCheckpoint = {
   transactionIndex: number;
 };
 
+export type LedgerVerificationReplayBlock = {
+  balanceDeltas: LedgerVerificationBalanceDelta[];
+  endIndex: number;
+  startIndex: number;
+};
+
 export type LedgerVerificationCache = {
   accountDeclarationSignature: string;
   checkpoints: LedgerVerificationCheckpoint[];
@@ -165,6 +171,7 @@ export type LedgerVerificationCache = {
   hasAccountDeclarations: boolean;
   hasCommodityDeclarations: boolean;
   orderedTransactions: LedgerVerificationTransactionDescriptor[];
+  replayBlocks: LedgerVerificationReplayBlock[];
 };
 
 export type ParseLedgerProgress = {

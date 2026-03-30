@@ -8,6 +8,7 @@ import type {
   LedgerVerificationCache,
   LedgerVerificationCheckpoint,
   LedgerVerificationFragment,
+  LedgerVerificationReplayBlock,
   LedgerVerificationTransactionDescriptor,
   ParsedLedgerFile,
   ParsedLedgerPosting,
@@ -76,12 +77,41 @@ export function verifyLedgerWorkspaceWithCache(
   const reusablePrefixLength = getReusablePrefixLength(plan, previousCache);
   const fragments = previousCache?.fragments.slice(0, reusablePrefixLength) ?? [];
   const checkpoints = cloneReusableCheckpoints(previousCache, reusablePrefixLength);
+  const reusableReplayBlocks = cloneReusableReplayBlocks(previousCache, reusablePrefixLength);
   const runtimeState = restoreRuntimeStateFromCache(previousCache, reusablePrefixLength);
   const previousReusableFragments = buildReusableFragmentLookup(previousCache, plan);
+  const previousReplayBlocks = buildReplayBlockLookup(previousCache);
 
-  for (let index = reusablePrefixLength; index < plan.orderedTransactions.length; index += 1) {
+  for (let index = reusablePrefixLength; index < plan.orderedTransactions.length;) {
     const descriptor = plan.orderedTransactions[index];
     const reusableFragment = previousReusableFragments.get(descriptor.cacheKey);
+    const reusableReplayBlock = findReusableReplayBlock({
+      currentIndex: index,
+      plan,
+      previousCache,
+      previousIndex: reusableFragment?.index ?? null,
+      previousReplayBlocks,
+    });
+
+    if (reusableReplayBlock) {
+      const blockLength = reusableReplayBlock.endIndex - reusableReplayBlock.startIndex;
+
+      for (let offset = 0; offset < blockLength; offset += 1) {
+        const previousFragment = previousCache?.fragments[reusableReplayBlock.startIndex + offset];
+
+        if (!previousFragment) {
+          break;
+        }
+
+        fragments[index + offset] = previousFragment;
+      }
+
+      applyBalanceDeltas(runtimeState, reusableReplayBlock.balanceDeltas);
+      checkpoints.push(createVerificationCheckpoint(index + blockLength, runtimeState));
+      index += blockLength;
+      continue;
+    }
+
     const fragment = reusableFragment
       ? reusableFragment.fragment
       : verifyTransactionFragment({
@@ -107,6 +137,8 @@ export function verifyLedgerWorkspaceWithCache(
     ) {
       checkpoints.push(createVerificationCheckpoint(index + 1, runtimeState));
     }
+
+    index += 1;
   }
 
   const verifyMs = Date.now() - startedAt;
@@ -124,6 +156,13 @@ export function verifyLedgerWorkspaceWithCache(
       hasAccountDeclarations: plan.hasAccountDeclarations,
       hasCommodityDeclarations: plan.hasCommodityDeclarations,
       orderedTransactions: plan.orderedTransactions,
+      replayBlocks: [
+        ...reusableReplayBlocks,
+        ...buildReplayBlocks(
+          fragments,
+          reusableReplayBlocks[reusableReplayBlocks.length - 1]?.endIndex ?? 0,
+        ),
+      ],
     },
   };
 }
@@ -308,6 +347,23 @@ function cloneReusableCheckpoints(
     .map((checkpoint) => cloneVerificationCheckpoint(checkpoint));
 }
 
+function cloneReusableReplayBlocks(
+  previousCache: LedgerVerificationCache | null,
+  reusablePrefixLength: number,
+) {
+  if (!previousCache || reusablePrefixLength === 0) {
+    return [];
+  }
+
+  return previousCache.replayBlocks
+    .filter((block) => block.endIndex <= reusablePrefixLength)
+    .map((block) => ({
+      balanceDeltas: block.balanceDeltas.map((delta) => ({ ...delta })),
+      endIndex: block.endIndex,
+      startIndex: block.startIndex,
+    }));
+}
+
 function restoreRuntimeStateFromCache(
   previousCache: LedgerVerificationCache | null,
   reusablePrefixLength: number,
@@ -373,6 +429,116 @@ function buildReusableFragmentLookup(
   }
 
   return reusable;
+}
+
+function buildReplayBlockLookup(previousCache: LedgerVerificationCache | null) {
+  if (!previousCache) {
+    return new Map<number, LedgerVerificationReplayBlock>();
+  }
+
+  return new Map<number, LedgerVerificationReplayBlock>(
+    previousCache.replayBlocks.map((block) => [block.startIndex, block] as const),
+  );
+}
+
+function findReusableReplayBlock(args: {
+  currentIndex: number;
+  plan: LedgerVerificationPlan;
+  previousCache: LedgerVerificationCache | null;
+  previousIndex: number | null;
+  previousReplayBlocks: Map<number, LedgerVerificationReplayBlock>;
+}) {
+  const { currentIndex, plan, previousCache, previousIndex, previousReplayBlocks } = args;
+
+  if (
+    !previousCache ||
+    previousIndex == null ||
+    currentIndex % CHECKPOINT_INTERVAL !== 0 ||
+    previousIndex % CHECKPOINT_INTERVAL !== 0
+  ) {
+    return null;
+  }
+
+  const replayBlock = previousReplayBlocks.get(previousIndex);
+
+  if (!replayBlock) {
+    return null;
+  }
+
+  const blockLength = replayBlock.endIndex - replayBlock.startIndex;
+
+  if (
+    blockLength <= 0 ||
+    currentIndex + blockLength > plan.orderedTransactions.length ||
+    replayBlock.endIndex > previousCache.orderedTransactions.length
+  ) {
+    return null;
+  }
+
+  for (let offset = 0; offset < blockLength; offset += 1) {
+    const currentDescriptor = plan.orderedTransactions[currentIndex + offset];
+    const previousDescriptor = previousCache.orderedTransactions[previousIndex + offset];
+    const previousFragment = previousCache.fragments[previousIndex + offset];
+
+    if (
+      !currentDescriptor ||
+      !previousDescriptor ||
+      !previousFragment ||
+      currentDescriptor.cacheKey !== previousDescriptor.cacheKey ||
+      previousFragment.dependsOnPriorBalances ||
+      !hasStableFragmentDeclarationContext(previousFragment, previousCache, plan)
+    ) {
+      return null;
+    }
+  }
+
+  return replayBlock;
+}
+
+function buildReplayBlocks(
+  fragments: LedgerVerificationFragment[],
+  startIndex = 0,
+) {
+  const replayBlocks: LedgerVerificationReplayBlock[] = [];
+  let aggregate = new Map<string, LedgerVerificationBalanceDelta>();
+  let blockIsReusable = true;
+  let blockStartIndex = startIndex;
+
+  for (let index = startIndex; index < fragments.length; index += 1) {
+    const fragment = fragments[index];
+
+    if (!fragment) {
+      blockIsReusable = false;
+      continue;
+    }
+
+    if (fragment.dependsOnPriorBalances) {
+      blockIsReusable = false;
+    }
+
+    addBalanceDeltasToAggregate(aggregate, fragment.balanceDeltas);
+
+    const isBoundary =
+      (index + 1) % CHECKPOINT_INTERVAL === 0 || index === fragments.length - 1;
+
+    if (!isBoundary) {
+      continue;
+    }
+
+    if (blockIsReusable) {
+      replayBlocks.push({
+        balanceDeltas: Array.from(aggregate.values()),
+        endIndex: index + 1,
+        startIndex: blockStartIndex,
+      });
+    }
+
+    aggregate = new Map();
+    blockIsReusable = true;
+    blockStartIndex = index + 1;
+  }
+
+  return replayBlocks;
 }
 
 function hasStableFragmentDeclarationContext(
@@ -1200,6 +1366,23 @@ function applyBalanceDeltas(
 ) {
   for (const delta of balanceDeltas) {
     applyBalanceDelta(runtimeState, delta);
+  }
+}
+
+function addBalanceDeltasToAggregate(
+  aggregate: Map<string, LedgerVerificationBalanceDelta>,
+  balanceDeltas: LedgerVerificationBalanceDelta[],
+) {
+  for (const delta of balanceDeltas) {
+    const key = `${delta.account}::${delta.commodity}`;
+    const existing = aggregate.get(key);
+
+    if (existing) {
+      existing.amount += delta.amount;
+      continue;
+    }
+
+    aggregate.set(key, { ...delta });
   }
 }
 
