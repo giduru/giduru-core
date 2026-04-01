@@ -1,120 +1,28 @@
-# `giduru-core`
+# `giduru` Workspace
 
-Pure parsing and verification engine extracted from Giduru's app runtime.
+This repository is a standard npm workspaces monorepo with two independently publishable packages:
 
-Detailed architecture and performance notes live in [ARCHITECTURE.md](./ARCHITECTURE.md).
+- [`giduru-core`](./packages/core/README.md): the pure parsing and verification engine
+- [`giduru-cli`](./packages/cli/README.md): a thin filesystem-backed CLI around the core
 
-## Install
+## Layout
+
+```text
+packages/
+  core/
+  cli/
+```
+
+## Common Commands
 
 ```sh
-npm install giduru-core
+npm install
+npm run build
+npm test
 ```
 
-This package is maintained from the [`giduru/giduru-core`](https://github.com/giduru/giduru-core) repository.
-
-## Goals
-
-- Keep filesystem IO, React, Zustand, and runtime orchestration out of the core engine.
-- Accept explicit document snapshots or per-file change notifications.
-- Reuse parsed files across runs so unchanged files are not reparsed.
-- Emit analysis output that is already indexed for fast higher-level querying.
-- Stay compatible with the hledger model where it matters, without inheriting directive-order dependence.
-
-## Public Shape
-
-- `createLedgerEngineState()`
-- `applyLedgerDocumentChanges(state, changes)`
-- `buildParsedLedgerWorkspace(state, { rootFilePaths })`
-- `analyzeLedgerState(state, verifyOptions)`
-- `analyzeLedgerDocuments(documentsByPath, options)`
-- `parseLedgerDocument()`
-- `parseLedgerWorkspace()`
-- `verifyLedgerWorkspace()`
-
-Documents are pure values:
-
-```ts
-type LedgerSourceDocument = {
-  content: string;
-  isLedger: boolean;
-  lastModified?: number;
-  name: string;
-  path: string;
-};
-```
-
-## Incremental Model
-
-`applyLedgerDocumentChanges()` reparses only:
-
-- files whose content or metadata changed
-- existing files with glob includes when the known path set changes
-
-Everything else stays cached in `parsedFilesByPath`.
-
-The app adapter in `apps/mobile/src/services/ledger-analysis.ts` now:
-
-- avoids rereading unchanged disk files
-- passes dirty drafts directly as document content
-- reuses the engine state across analysis runs
-
-## Directive Semantics
-
-Declaration-style directives are intentionally order-insensitive in this engine.
-
-- `account` and `commodity` declarations are collected across the reachable workspace first
-- strict validation runs against those full sets
-- the engine does not depend on whether a declaration appeared before or after a posting
-
-This is a deliberate deviation from order-sensitive reader behavior upstream.
-
-## Current hledger-Compatible Coverage
-
-- include directives, including glob expansion and unmatched-glob diagnostics
-- declared account and commodity strictness
-- missing-amount inference
-- posting price annotations used for balancing and surfaced as derived prices
-- posting kinds: real, virtual, balanced virtual
-- balance assertions and simple balance assignments
-- separate balancing for real vs balanced-virtual posting groups
-
-## Known Gaps
-
-- full hledger mixed-commodity balance assignment semantics
-- automatic commodity conversion during balancing
-- lot price/date semantics beyond parse capture
-- posting-date-aware balancing order
-- alias/apply-account and other imperative directive semantics
-
-Those gaps are now isolated to the package instead of being mixed into app services.
-
-## Benchmarks
-
-Run the package benchmark harness with:
+Core-specific benchmark runs go through the workspace root:
 
 ```sh
 npm run bench -- --preset medium
 ```
-
-Supported flags:
-
-- `--preset small|medium|large|enterprise`
-- `--iterations N`
-- `--warmup N`
-- `--filter substring`
-- `--json`
-
-The harness prints wall time, parse time, verify time, parsed/reused file counts, and Node heap/RSS usage.
-
-The harness covers:
-
-- large single-file simple journals
-- large single-file priced journals
-- deep static include graphs
-- glob-included workspaces
-- incremental leaf edits and worst-case early edits
-- declaration-file edits that invalidate global strictness
-- glob file additions and deletions
-- no-op cached analyses to expose pure materialization overhead
-
-The `enterprise` preset is intended for capacity planning rather than quick local smoke tests. It pushes file counts and transaction counts high enough to surface index, memory, and invalidation behavior on much larger synthetic ledgers.

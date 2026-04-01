@@ -1,0 +1,56 @@
+{
+  "name": "giduru-cli",
+  "version": "0.1.0",
+  "description": "Thin command-line interface for giduru-core.",
+  "keywords": [
+    "giduru",
+    "ledger",
+    "hledger",
+    "cli",
+    "accounting"
+  ],
+  "license": "UNLICENSED",
+  "homepage": "https://github.com/giduru/giduru-core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/giduru/giduru-core.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/giduru/giduru-core/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "giduru": "dist/src/index.js"
+  },
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "require": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "pack:dry-run": "npm_config_cache=.npm-cache npm pack --dry-run",
+    "publish:check": "npm run typecheck && npm test && npm run pack:dry-run",
+    "publish:public": "npm_config_cache=.npm-cache npm publish --access public",
+    "test": "npm run build --workspace giduru-core && npm run build && node --test dist/test/**/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit --tsBuildInfoFile .tsconfig.typecheck.tsbuildinfo",
+    "prepublishOnly": "npm run publish:check"
+  },
+  "dependencies": {
+    "giduru-core": "^0.1.1"
+  }
+}

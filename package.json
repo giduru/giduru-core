@@ -1,57 +1,21 @@
 {
-  "name": "giduru-core",
-  "version": "0.1.1",
-  "description": "Pure hledger parsing and verification engine extracted from Giduru.",
-  "keywords": [
-    "giduru",
-    "hledger",
-    "ledger",
-    "parser",
-    "accounting"
+  "name": "giduru-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Workspace for the giduru-core and giduru-cli npm packages.",
+  "workspaces": [
+    "packages/*"
   ],
-  "license": "UNLICENSED",
-  "homepage": "https://github.com/giduru/giduru-core#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/giduru/giduru-core.git"
-  },
-  "bugs": {
-    "url": "https://github.com/giduru/giduru-core/issues"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "main": "dist/src/index.js",
-  "types": "dist/src/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/src/index.d.ts",
-      "require": "./dist/src/index.js"
-    }
-  },
-  "files": [
-    "dist/src",
-    "README.md",
-    "ARCHITECTURE.md"
-  ],
-  "sideEffects": false,
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "bench": "npm run build && node bench/run.js",
-    "prepare": "npm run build",
-    "pack:dry-run": "npm_config_cache=.npm-cache npm pack --dry-run",
-    "publish:check": "npm run typecheck && npm test && npm run pack:dry-run",
-    "publish:public": "npm_config_cache=.npm-cache npm publish --access public",
-    "test": "npm run build && node --test dist/test/**/*.test.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit --tsBuildInfoFile .tsconfig.typecheck.tsbuildinfo",
-    "prepublishOnly": "npm run publish:check"
-  },
-  "dependencies": {
-    "@lezer/common": "^1.5.1",
-    "codemirror-lang-hledger": "^0.5.0"
+    "bench": "npm run bench --workspace giduru-core --",
+    "build": "npm run build --workspace giduru-core && npm run build --workspace giduru-cli",
+    "pack:dry-run": "npm run pack:dry-run --workspace giduru-core && npm run pack:dry-run --workspace giduru-cli",
+    "publish:check": "npm run publish:check --workspace giduru-core && npm run publish:check --workspace giduru-cli",
+    "test": "npm run test --workspace giduru-core && npm run test --workspace giduru-cli",
+    "typecheck": "npm run typecheck --workspace giduru-core && npm run typecheck --workspace giduru-cli"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
