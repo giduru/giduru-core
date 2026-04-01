@@ -638,6 +638,300 @@ commodity USD 1.00
   );
 });
 
+test('account catalog preserves single declarations and heuristic fallback for unannotated accounts', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `account Expenses:Food ; bucket:household
+account Assets:Cash ; type:A
+account Equity:OpeningBalances ; type:E
+commodity USD 1.00
+
+2024-01-01 Lunch
+  Expenses:Food  10 USD
+  Assets:Cash  -10 USD
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const entry = analysis.accountCatalog.find((account) => account.account === 'Expenses:Food');
+
+  assert.ok(entry);
+  assert.equal(entry.declared, true);
+  assert.equal(entry.used, true);
+  assert.equal(entry.declarationCount, 1);
+  assert.equal(entry.postingCount, 1);
+  assert.equal(entry.declaredType, null);
+  assert.equal(entry.effectiveType, 'expense');
+  assert.deepEqual(entry.paths, ['main.journal']);
+  assert.deepEqual(entry.tags, [{ name: 'bucket', value: 'household' }]);
+  assert.deepEqual(entry.typeAnnotationValues, []);
+  assert.deepEqual(entry.typeDiagnostics, []);
+  assert.equal(entry.declarations.length, 1);
+  assert.equal(entry.declarations[0]?.path, 'main.journal');
+  assert.equal(entry.declarations[0]?.line, 1);
+  assert.deepEqual(
+    analysis.index.accountCatalogIdsByEffectiveType.expense,
+    ['Expenses:Food'],
+  );
+  assert.deepEqual(
+    analysis.index.accountCatalogIdsByTag[createLedgerTagKey({ name: 'bucket', value: 'household' })],
+    ['Expenses:Food'],
+  );
+});
+
+test('account catalog merges repeated declarations deterministically', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `include a.journal
+include b.journal
+
+account Assets:Cash ; type:A
+commodity USD 1.00
+
+2024-01-01 Lunch
+  Expenses:Food  10 USD
+  Assets:Cash  -10 USD
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+    [
+      'a.journal',
+      {
+        content: `account Expenses:Food ; type:X, view:taxable
+`,
+        isLedger: true,
+        name: 'a.journal',
+        path: 'a.journal',
+      },
+    ],
+    [
+      'b.journal',
+      {
+        content: `account Expenses:Food ; type:expense, bucket:household
+`,
+        isLedger: true,
+        name: 'b.journal',
+        path: 'b.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['a.journal', 'b.journal', 'main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const entry = analysis.accountCatalog.find((account) => account.account === 'Expenses:Food');
+
+  assert.ok(entry);
+  assert.equal(entry.declaredType, 'expense');
+  assert.equal(entry.effectiveType, 'expense');
+  assert.equal(entry.declarationCount, 2);
+  assert.deepEqual(entry.paths, ['a.journal', 'b.journal']);
+  assert.deepEqual(entry.typeAnnotationValues, ['X', 'expense']);
+  assert.deepEqual(entry.tags, [
+    { name: 'view', value: 'taxable' },
+    { name: 'bucket', value: 'household' },
+  ]);
+  assert.deepEqual(
+    entry.declarations.map((declaration) => `${declaration.path}:${declaration.line}`),
+    ['a.journal:1', 'b.journal:1'],
+  );
+  assert.deepEqual(
+    analysis.index.accountCatalogIdsByPath['a.journal'],
+    ['Expenses:Food'],
+  );
+  assert.deepEqual(
+    analysis.index.accountCatalogIdsByTagName.bucket,
+    ['Expenses:Food'],
+  );
+});
+
+test('account catalog marks conflicting explicit declarations as unknown and emits diagnostics', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `account CashPool ; type:A
+account CashPool ; type:X
+account Equity:OpeningBalances ; type:E
+commodity USD 1.00
+
+2024-01-01 Opening
+  CashPool  1 USD
+  Equity:OpeningBalances  -1 USD
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const entry = analysis.accountCatalog.find((account) => account.account === 'CashPool');
+
+  assert.ok(entry);
+  assert.equal(entry.declaredType, 'unknown');
+  assert.equal(entry.effectiveType, 'unknown');
+  assert.deepEqual(entry.typeAnnotationValues, ['A', 'X']);
+  assert.equal(
+    analysis.register.find((registerEntry) => registerEntry.account === 'CashPool')?.accountType,
+    'unknown',
+  );
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        'Account "CashPool" has conflicting type annotations across declarations.',
+      ),
+    ),
+    true,
+  );
+});
+
+test('hierarchy type conflicts emit diagnostics without overriding exact-account explicit types', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `account Assets ; type:A
+account Assets:Cash ; type:X
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const entry = analysis.accountCatalog.find((account) => account.account === 'Assets:Cash');
+
+  assert.ok(entry);
+  assert.equal(entry.declared, true);
+  assert.equal(entry.used, false);
+  assert.equal(entry.declaredType, 'expense');
+  assert.equal(entry.effectiveType, 'expense');
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        'Account "Assets:Cash" is explicitly typed as expense, but ancestor account "Assets" is explicitly typed as asset.',
+      ),
+    ),
+    true,
+  );
+});
+
+test('declared-only accounts are included in the account catalog', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `account Assets:Savings ; type:A
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const entry = analysis.accountCatalog.find((account) => account.account === 'Assets:Savings');
+
+  assert.ok(entry);
+  assert.equal(entry.declared, true);
+  assert.equal(entry.used, false);
+  assert.equal(entry.postingCount, 0);
+  assert.deepEqual(entry.commoditiesUsed, []);
+});
+
+test('used-only accounts are included in the account catalog and still emit undeclared diagnostics', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `account Assets:Cash ; type:A
+commodity USD 1.00
+
+2024-01-01 Lunch
+  Expenses:Food  10 USD
+  Assets:Cash  -10 USD
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const entry = analysis.accountCatalog.find((account) => account.account === 'Expenses:Food');
+
+  assert.ok(entry);
+  assert.equal(entry.declared, false);
+  assert.equal(entry.used, true);
+  assert.equal(entry.postingCount, 1);
+  assert.equal(entry.effectiveType, 'expense');
+  assert.deepEqual(entry.commoditiesUsed, ['USD']);
+  assert.equal(
+    analysis.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('Undeclared account "Expenses:Food"'),
+    ),
+    true,
+  );
+});
+
 test('posting tags include transitive account and transaction tags and are indexed/filterable', async () => {
   const documents = new Map([
     [

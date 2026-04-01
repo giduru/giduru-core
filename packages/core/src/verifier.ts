@@ -2,6 +2,8 @@ import { inferAccountTypeFromName } from './account';
 import type {
   AccountType,
   LedgerAnalysis,
+  LedgerAccountCatalogEntry,
+  LedgerAccountDirectiveRecord,
   LedgerAnalysisIndex,
   LedgerDiagnostic,
   LedgerPrice,
@@ -32,8 +34,9 @@ type AccountBalanceMap = Map<string, Map<string, number>>;
 type CommodityTotals = Map<string, number>;
 
 type DeclaredAccountMetadata = {
+  declarations: LedgerAccountDirectiveRecord[];
+  declaredType: AccountType | null;
   tags: LedgerTag[];
-  type: AccountType | null;
 };
 
 type PendingPosting = {
@@ -262,36 +265,22 @@ function buildVerificationPlan(
     }
 
     for (const directive of parsedFile.accountDirectives) {
-      const existing = accountMetadataByName.get(directive.account);
-
-      if (!existing) {
-        accountMetadataByName.set(directive.account, {
-          tags: mergeLedgerTags(directive.tags),
-          type: directive.type,
-        });
-        continue;
-      }
-
-      existing.tags = mergeLedgerTags(existing.tags, directive.tags);
-
-      if (directive.type == null || existing.type === directive.type) {
-        continue;
-      }
-
-      if (existing.type == null) {
-        existing.type = directive.type;
-        continue;
-      }
-
-      existing.type = 'unknown';
-      baseDiagnostics.push(
-        createDiagnostic(
-          parsedFile.file.path,
-          `Account "${directive.account}" has conflicting type annotations across declarations.`,
-          directive.line,
-          'error',
-        ),
+      const record = createLedgerAccountDirectiveRecord(parsedFile.file.path, directive);
+      const hasConflictingExplicitType = appendDeclaredAccountMetadata(
+        accountMetadataByName,
+        record,
       );
+
+      if (hasConflictingExplicitType) {
+        baseDiagnostics.push(
+          createDiagnostic(
+            parsedFile.file.path,
+            `Account "${directive.account}" has conflicting type annotations across declarations.`,
+            directive.line,
+            'error',
+          ),
+        );
+      }
     }
 
     for (const commodity of parsedFile.declaredCommodities) {
@@ -315,6 +304,8 @@ function buildVerificationPlan(
       postingCount += transaction.postings.length;
     }
   }
+
+  appendAccountHierarchyTypeDiagnostics(accountMetadataByName, baseDiagnostics);
 
   orderedTransactions.sort((left, right) => {
     if (left.transaction.date === right.transaction.date) {
@@ -347,6 +338,124 @@ function buildVerificationPlan(
     postingCount,
     transactionCount: orderedTransactions.length,
   };
+}
+
+function createLedgerAccountDirectiveRecord(
+  path: string,
+  directive: ParsedLedgerFile['accountDirectives'][number],
+): LedgerAccountDirectiveRecord {
+  return {
+    account: directive.account,
+    comment: directive.comment,
+    line: directive.line,
+    path,
+    tags: directive.tags.map((tag) => ({ ...tag })),
+    type: directive.type,
+    typeAnnotationValues: [...directive.typeAnnotationValues],
+    typeDiagnostic: directive.typeDiagnostic,
+  };
+}
+
+function appendDeclaredAccountMetadata(
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>,
+  declaration: LedgerAccountDirectiveRecord,
+) {
+  const existing = accountMetadataByName.get(declaration.account);
+
+  if (!existing) {
+    accountMetadataByName.set(declaration.account, {
+      declarations: [declaration],
+      declaredType: declaration.type,
+      tags: mergeLedgerTags(declaration.tags),
+    });
+    return false;
+  }
+
+  existing.declarations.push(declaration);
+  existing.tags = mergeLedgerTags(existing.tags, declaration.tags);
+  const mergedDeclaredType = mergeDeclaredAccountType(existing.declaredType, declaration.type);
+  existing.declaredType = mergedDeclaredType.type;
+  return mergedDeclaredType.conflict;
+}
+
+function mergeDeclaredAccountType(
+  currentType: AccountType | null,
+  nextType: AccountType | null,
+) {
+  if (nextType == null || currentType === nextType) {
+    return { conflict: false, type: currentType };
+  }
+
+  if (currentType == null) {
+    return { conflict: false, type: nextType };
+  }
+
+  return { conflict: true, type: 'unknown' as const };
+}
+
+function appendAccountHierarchyTypeDiagnostics(
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>,
+  diagnostics: LedgerDiagnostic[],
+) {
+  const sortedAccounts = Array.from(accountMetadataByName.keys()).sort((left, right) =>
+    left.localeCompare(right),
+  );
+
+  for (const account of sortedAccounts) {
+    const metadata = accountMetadataByName.get(account);
+
+    if (!metadata || metadata.declaredType == null || metadata.declaredType === 'unknown') {
+      continue;
+    }
+
+    const ancestor = findNearestTypedAncestor(account, accountMetadataByName);
+
+    if (!ancestor || ancestor.type === metadata.declaredType) {
+      continue;
+    }
+
+    for (const declaration of metadata.declarations) {
+      if (declaration.type !== metadata.declaredType) {
+        continue;
+      }
+
+      diagnostics.push(
+        createDiagnostic(
+          declaration.path,
+          `Account "${account}" is explicitly typed as ${metadata.declaredType}, but ancestor account "${ancestor.account}" is explicitly typed as ${ancestor.type}. Explicit account-type annotations must agree across the declared account hierarchy.`,
+          declaration.line,
+          'error',
+        ),
+      );
+    }
+  }
+}
+
+function findNearestTypedAncestor(
+  account: string,
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>,
+) {
+  const segments = account.split(':');
+
+  for (let index = segments.length - 1; index >= 1; index -= 1) {
+    const ancestorAccount = segments.slice(0, index).join(':');
+    const ancestorMetadata = accountMetadataByName.get(ancestorAccount);
+
+    if (
+      !ancestorMetadata ||
+      ancestorMetadata.declaredType == null ||
+      ancestorMetadata.declaredType === 'unknown'
+    ) {
+      continue;
+    }
+
+    return {
+      account: ancestorAccount,
+      type: ancestorMetadata.declaredType,
+    };
+  }
+
+  return null;
 }
 
 function getReusablePrefixLength(
@@ -755,9 +864,15 @@ function materializeLedgerAnalysis(
   const sortedPrices = mergeSortedPrices(plan.directivePrices, postingPrices);
   diagnostics.push(...detectConflictingPriceDiagnostics(sortedPrices));
   const sortedDiagnostics = diagnostics.sort(compareDiagnostics);
+  const accountCatalog = materializeAccountCatalog(
+    plan.declaredAccounts,
+    plan.accountMetadataByName,
+    sortedRegister,
+  );
 
   return {
     accounts: Array.from(accounts).sort((left, right) => left.localeCompare(right)),
+    accountCatalog,
     balances: Array.from(runtimeState.runningBalances.entries())
       .flatMap(([account, totals]) =>
         Array.from(totals.entries())
@@ -779,7 +894,12 @@ function materializeLedgerAnalysis(
     ),
     diagnostics: sortedDiagnostics,
     graph: plan.graph,
-    index: buildAnalysisIndex(sortedDiagnostics, sortedRegister, sortedTransactions),
+    index: buildAnalysisIndex(
+      sortedDiagnostics,
+      accountCatalog,
+      sortedRegister,
+      sortedTransactions,
+    ),
     parserSummary: {
       errorNodeCount: workspace.files.reduce(
         (total, file) => total + file.stats.errorNodeCount,
@@ -802,6 +922,105 @@ function materializeLedgerAnalysis(
     },
     transactions: sortedTransactions,
   };
+}
+
+function materializeAccountCatalog(
+  declaredAccounts: Set<string>,
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>,
+  register: RegisterEntry[],
+) {
+  const usageByAccount = collectAccountUsage(register);
+  const accounts = new Set<string>([
+    ...declaredAccounts,
+    ...usageByAccount.keys(),
+  ]);
+
+  return Array.from(accounts)
+    .sort((left, right) => left.localeCompare(right))
+    .map((account) => {
+      const metadata = accountMetadataByName.get(account);
+      const declarations = metadata?.declarations.map(copyLedgerAccountDirectiveRecord) ?? [];
+      const usage = usageByAccount.get(account);
+
+      return {
+        account,
+        comments: collectUniqueNonEmptyValues(declarations.map((declaration) => declaration.comment)),
+        commoditiesUsed: usage?.commoditiesUsed ?? [],
+        declarationCount: declarations.length,
+        declarations,
+        declared: declaredAccounts.has(account),
+        declaredType: metadata?.declaredType ?? null,
+        effectiveType: resolveEffectiveAccountType(account, metadata),
+        id: account,
+        paths: collectUniqueValues(declarations.map((declaration) => declaration.path)),
+        postingCount: usage?.postingCount ?? 0,
+        tags: metadata?.tags.map((tag) => ({ ...tag })) ?? [],
+        typeAnnotationValues: collectUniqueValues(
+          declarations.flatMap((declaration) => declaration.typeAnnotationValues),
+        ),
+        typeDiagnostics: collectUniqueNonEmptyValues(
+          declarations.flatMap((declaration) =>
+            declaration.typeDiagnostic ? [declaration.typeDiagnostic] : [],
+          ),
+        ),
+        used: usage != null,
+      } satisfies LedgerAccountCatalogEntry;
+    });
+}
+
+function collectAccountUsage(register: RegisterEntry[]) {
+  const usageByAccount = new Map<
+    string,
+    { commoditiesUsed: string[]; postingCount: number; seenCommodities: Set<string> }
+  >();
+
+  for (const entry of register) {
+    let usage = usageByAccount.get(entry.account);
+
+    if (!usage) {
+      usage = {
+        commoditiesUsed: [],
+        postingCount: 0,
+        seenCommodities: new Set<string>(),
+      };
+      usageByAccount.set(entry.account, usage);
+    }
+
+    usage.postingCount += 1;
+
+    if (!usage.seenCommodities.has(entry.commodity)) {
+      usage.seenCommodities.add(entry.commodity);
+      usage.commoditiesUsed.push(entry.commodity);
+    }
+  }
+
+  return new Map(
+    Array.from(usageByAccount.entries()).map(([account, usage]) => [
+      account,
+      {
+        commoditiesUsed: usage.commoditiesUsed,
+        postingCount: usage.postingCount,
+      },
+    ]),
+  );
+}
+
+function copyLedgerAccountDirectiveRecord(
+  declaration: LedgerAccountDirectiveRecord,
+): LedgerAccountDirectiveRecord {
+  return {
+    ...declaration,
+    tags: declaration.tags.map((tag) => ({ ...tag })),
+    typeAnnotationValues: [...declaration.typeAnnotationValues],
+  };
+}
+
+function collectUniqueValues(values: string[]) {
+  return Array.from(new Set(values));
+}
+
+function collectUniqueNonEmptyValues(values: string[]) {
+  return collectUniqueValues(values.filter((value) => value.length > 0));
 }
 
 function verifyTransactionFragment(args: {
@@ -1244,7 +1463,7 @@ function applyPostingEntry(args: {
   const entry: RegisterEntry = {
     account: posting.account,
     accountTags: accountMetadata?.tags ?? [],
-    accountType: resolvePostingAccountType(posting.account, accountMetadata),
+    accountType: resolveEffectiveAccountType(posting.account, accountMetadata),
     amount: posting.amount,
     balanceAssertion: posting.balanceAssertion,
     comment: posting.comment,
@@ -1895,12 +2114,12 @@ function hasLedgerExtension(path: string) {
   return LEDGER_FILE_EXTENSIONS.has(name.slice(dotIndex).toLowerCase());
 }
 
-function resolvePostingAccountType(
+function resolveEffectiveAccountType(
   account: string,
   metadata: DeclaredAccountMetadata | undefined,
 ): AccountType {
-  if (metadata?.type) {
-    return metadata.type;
+  if (metadata?.declaredType != null) {
+    return metadata.declaredType;
   }
 
   return classifyAccount(account);
@@ -1928,10 +2147,16 @@ function buildSearchText(fields: string[]) {
 
 function buildAnalysisIndex(
   diagnostics: LedgerDiagnostic[],
+  accountCatalog: LedgerAccountCatalogEntry[],
   register: RegisterEntry[],
   transactions: Transaction[],
 ): LedgerAnalysisIndex {
   const index: LedgerAnalysisIndex = {
+    accountCatalogIdsByEffectiveType: {},
+    accountCatalogIdsByPath: {},
+    accountCatalogIdsByTag: {},
+    accountCatalogIdsByTagName: {},
+    accountCatalogPositionById: {},
     diagnosticPositionById: {},
     diagnosticsByPath: {},
     registerIdsByAccount: {},
@@ -1950,6 +2175,28 @@ function buildAnalysisIndex(
   diagnostics.forEach((diagnostic, position) => {
     index.diagnosticPositionById[diagnostic.id] = position;
     appendIndexId(index.diagnosticsByPath, diagnostic.path, diagnostic.id);
+  });
+
+  accountCatalog.forEach((entry, position) => {
+    index.accountCatalogPositionById[entry.id] = position;
+    appendIndexId(index.accountCatalogIdsByEffectiveType, entry.effectiveType, entry.id);
+
+    for (const path of entry.paths) {
+      appendIndexId(index.accountCatalogIdsByPath, path, entry.id);
+    }
+
+    const seenTagNames = new Set<string>();
+
+    for (const tag of entry.tags) {
+      appendIndexId(index.accountCatalogIdsByTag, buildLedgerTagKey(tag), entry.id);
+
+      if (seenTagNames.has(tag.name)) {
+        continue;
+      }
+
+      seenTagNames.add(tag.name);
+      appendIndexId(index.accountCatalogIdsByTagName, tag.name, entry.id);
+    }
   });
 
   register.forEach((entry, position) => {
@@ -2019,7 +2266,7 @@ function buildDeclaredAccountMetadataSignature(metadata: DeclaredAccountMetadata
     tags: Array.from(new Set(metadata.tags.map((tag) => buildLedgerTagKey(tag)))).sort(
       (left, right) => left.localeCompare(right),
     ),
-    type: metadata.type,
+    type: metadata.declaredType,
   });
 }
 

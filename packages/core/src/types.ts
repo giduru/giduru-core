@@ -269,7 +269,41 @@ export type AccountBalance = {
   commodity: string;
 };
 
+export type LedgerAccountDirectiveRecord = {
+  account: string;
+  comment: string;
+  line: number;
+  path: string;
+  tags: LedgerTag[];
+  type: AccountType | null;
+  typeAnnotationValues: string[];
+  typeDiagnostic: null | string;
+};
+
+export type LedgerAccountCatalogEntry = {
+  account: string;
+  comments: string[];
+  commoditiesUsed: string[];
+  declarationCount: number;
+  declarations: LedgerAccountDirectiveRecord[];
+  declared: boolean;
+  declaredType: AccountType | null;
+  effectiveType: AccountType;
+  id: string;
+  paths: string[];
+  postingCount: number;
+  tags: LedgerTag[];
+  typeAnnotationValues: string[];
+  typeDiagnostics: string[];
+  used: boolean;
+};
+
 export type LedgerAnalysisIndex = {
+  accountCatalogIdsByEffectiveType: Record<string, string[]>;
+  accountCatalogIdsByPath: Record<string, string[]>;
+  accountCatalogIdsByTag: Record<string, string[]>;
+  accountCatalogIdsByTagName: Record<string, string[]>;
+  accountCatalogPositionById: Record<string, number>;
   diagnosticPositionById: Record<string, number>;
   diagnosticsByPath: Record<string, string[]>;
   registerIdsByAccount: Record<string, string[]>;
@@ -287,6 +321,7 @@ export type LedgerAnalysisIndex = {
 
 export type LedgerAnalysis = {
   accounts: string[];
+  accountCatalog: LedgerAccountCatalogEntry[];
   balances: AccountBalance[];
   declaredAccounts: string[];
   declaredCommodities: string[];

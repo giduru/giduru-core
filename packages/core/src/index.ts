@@ -11,6 +11,8 @@ export {
 export { verifyLedgerWorkspace } from './verifier';
 export type {
   AccountBalance,
+  LedgerAccountCatalogEntry,
+  LedgerAccountDirectiveRecord,
   AccountType,
   BalanceAssertionOperator,
   LedgerAnalysis,
