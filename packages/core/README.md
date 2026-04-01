@@ -3,6 +3,7 @@
 Pure parsing and verification engine extracted from Giduru's app runtime.
 
 Detailed architecture and performance notes live in [ARCHITECTURE.md](./ARCHITECTURE.md).
+Artifact inventory and query-layer notes live in [ARTIFACTS.md](./ARTIFACTS.md).
 
 ## Install
 
