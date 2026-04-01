@@ -1,6 +1,7 @@
 import { TreeFragment, type Tree } from '@lezer/common';
 import { parser as hledgerParser } from 'codemirror-lang-hledger';
 
+import { resolveAccountTypeFromTags } from './account';
 import {
   expandGlob,
   isGlobPattern,
@@ -12,6 +13,7 @@ import type {
   LedgerDiagnostic,
   LedgerSourceDocument,
   LedgerTag,
+  ParsedLedgerAccountDirective,
   ParseLedgerProgress,
   ParsedLedgerBalanceAssertion,
   ParsedLedgerFile,
@@ -75,6 +77,7 @@ export function parseLedgerDocumentWithCache(
   const parseMs = Date.now() - parseStartedAt;
   const lineStarts = buildLineStarts(document.content);
   const {
+    accountDirectives,
     declaredAccounts,
     declaredCommodities,
     includeDirectives,
@@ -103,33 +106,38 @@ export function parseLedgerDocumentWithCache(
   return {
     cache: { tree },
     parsedFile: {
-    declaredAccounts,
-    declaredCommodities,
-    directiveDiagnostics: buildIncludeDiagnostics(document.path, includeDirectives),
-    file: document,
-    includeDirectives,
-    includeTargets: Array.from(
-      new Set(
-        includeDirectives.flatMap((directive) =>
-          directive.matches.filter((target) => target !== document.path),
+      accountDirectives,
+      declaredAccounts,
+      declaredCommodities,
+      directiveDiagnostics: buildDirectiveDiagnostics(
+        document.path,
+        includeDirectives,
+        accountDirectives,
+      ),
+      file: document,
+      includeDirectives,
+      includeTargets: Array.from(
+        new Set(
+          includeDirectives.flatMap((directive) =>
+            directive.matches.filter((target) => target !== document.path),
+          ),
+        ),
+      ).sort((left, right) => left.localeCompare(right)),
+      prices,
+      stats: {
+        errorNodeCount,
+        nodeCount,
+        parseMs,
+        topNode: tree.topNode.type.name,
+      },
+      syntaxDiagnostics: Array.from(errorLines).map((line) =>
+        createParserDiagnostic(
+          document.path,
+          line,
+          'Lezer parser reported a syntax error node.',
         ),
       ),
-    ).sort((left, right) => left.localeCompare(right)),
-    prices,
-    stats: {
-      errorNodeCount,
-      nodeCount,
-      parseMs,
-      topNode: tree.topNode.type.name,
-    },
-    syntaxDiagnostics: Array.from(errorLines).map((line) =>
-      createParserDiagnostic(
-        document.path,
-        line,
-        'Lezer parser reported a syntax error node.',
-      ),
-    ),
-    transactions,
+      transactions,
     } satisfies ParsedLedgerFile,
   };
 }
@@ -234,6 +242,7 @@ function extractParsedLedgerFileData(
   knownFilePaths: Iterable<string>,
 ) {
   const includeDirectives: ParsedLedgerIncludeDirective[] = [];
+  const accountDirectives: ParsedLedgerAccountDirective[] = [];
   const declaredAccounts: string[] = [];
   const declaredCommodities: string[] = [];
   const prices: ParsedLedgerPrice[] = [];
@@ -241,7 +250,14 @@ function extractParsedLedgerFileData(
   const cursor = tree.cursor();
 
   if (!cursor.firstChild()) {
-    return { declaredAccounts, declaredCommodities, includeDirectives, prices, transactions };
+    return {
+      accountDirectives,
+      declaredAccounts,
+      declaredCommodities,
+      includeDirectives,
+      prices,
+      transactions,
+    };
   }
 
   do {
@@ -255,17 +271,11 @@ function extractParsedLedgerFileData(
     }
 
     if (nodeName === 'AccountDirective') {
-      if (cursor.firstChild()) {
-        do {
-          if ((cursor.type.name as string) === 'DirectiveAccountName') {
-            const name = text.slice(cursor.from, cursor.to).trim();
+      const directive = extractAccountDirective(cursor, text, lineStarts);
 
-            if (name) {
-              declaredAccounts.push(name);
-            }
-          }
-        } while (cursor.nextSibling());
-        cursor.parent();
+      if (directive) {
+        accountDirectives.push(directive);
+        declaredAccounts.push(directive.account);
       }
 
       continue;
@@ -309,7 +319,14 @@ function extractParsedLedgerFileData(
   } while (cursor.nextSibling());
 
   cursor.parent();
-  return { declaredAccounts, declaredCommodities, includeDirectives, prices, transactions };
+  return {
+    accountDirectives,
+    declaredAccounts,
+    declaredCommodities,
+    includeDirectives,
+    prices,
+    transactions,
+  };
 }
 
 function extractIncludeDirective(
@@ -400,43 +417,97 @@ function extractIncludeDirective(
   };
 }
 
-function buildIncludeDiagnostics(
+function buildDirectiveDiagnostics(
   filePath: string,
   includeDirectives: ParsedLedgerIncludeDirective[],
+  accountDirectives: ParsedLedgerAccountDirective[],
 ) {
-  return includeDirectives.flatMap((directive) => {
-    if (directive.error === 'missing-target') {
-      return [
-        createParserDiagnostic(
-          filePath,
-          directive.line,
-          'Include directive needs a file path or glob pattern argument.',
-        ),
-      ];
+  return [
+    ...includeDirectives.flatMap((directive) => {
+      if (directive.error === 'missing-target') {
+        return [
+          createParserDiagnostic(
+            filePath,
+            directive.line,
+            'Include directive needs a file path or glob pattern argument.',
+          ),
+        ];
+      }
+
+      if (directive.error === 'invalid-glob') {
+        return [
+          createParserDiagnostic(
+            filePath,
+            directive.line,
+            `Invalid glob pattern "${directive.normalized || directive.raw}".`,
+          ),
+        ];
+      }
+
+      if (directive.error === 'no-match') {
+        return [
+          createParserDiagnostic(
+            filePath,
+            directive.line,
+            `No files were matched by: ${directive.normalized || directive.raw}`,
+          ),
+        ];
+      }
+
+      return [];
+    }),
+    ...accountDirectives.flatMap((directive) =>
+      directive.typeDiagnostic
+        ? [createParserDiagnostic(filePath, directive.line, directive.typeDiagnostic)]
+        : [],
+    ),
+  ];
+}
+
+function extractAccountDirective(
+  cursor: TreeCursor,
+  text: string,
+  lineStarts: number[],
+): ParsedLedgerAccountDirective | null {
+  let account = '';
+  const commentLines: string[] = [];
+
+  if (!cursor.firstChild()) {
+    return null;
+  }
+
+  do {
+    const nodeName = cursor.type.name as string;
+
+    if (nodeName === 'DirectiveAccountName') {
+      account = text.slice(cursor.from, cursor.to).trim();
+      continue;
     }
 
-    if (directive.error === 'invalid-glob') {
-      return [
-        createParserDiagnostic(
-          filePath,
-          directive.line,
-          `Invalid glob pattern "${directive.normalized || directive.raw}".`,
-        ),
-      ];
+    if (nodeName === 'InlineComment' || nodeName === 'IndentedComment') {
+      commentLines.push(extractCommentText(cursor, text));
     }
+  } while (cursor.nextSibling());
 
-    if (directive.error === 'no-match') {
-      return [
-        createParserDiagnostic(
-          filePath,
-          directive.line,
-          `No files were matched by: ${directive.normalized || directive.raw}`,
-        ),
-      ];
-    }
+  cursor.parent();
 
-    return [];
-  });
+  if (!account) {
+    return null;
+  }
+
+  const metadata = extractCommentMetadata(commentLines);
+  const accountType = resolveAccountTypeFromTags(metadata.tags);
+  const tags = metadata.tags.filter((tag) => tag.name.toLowerCase() !== 'type');
+
+  return {
+    account,
+    comment: metadata.text,
+    line: lineNumberAt(cursor.from, lineStarts),
+    tags,
+    type: accountType.type,
+    typeAnnotationValues: accountType.typeAnnotationValues,
+    typeDiagnostic: accountType.typeDiagnostic,
+  } satisfies ParsedLedgerAccountDirective;
 }
 
 function walkCursor(

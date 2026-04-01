@@ -1,4 +1,5 @@
 export { basename, expandGlob, isGlobPattern, matchGlob, normalizeIncludeTarget, resolveRelativePath, validateGlobPattern } from './path';
+export { createLedgerTagKey, filterRegisterEntries, filterRegisterEntryIds, getRegisterEntryIdsForTag } from './filter';
 export { parseLedgerDocument, parseLedgerWorkspace } from './parser';
 export {
   analyzeLedgerDocuments,
@@ -20,8 +21,10 @@ export type {
   LedgerEngineState,
   LedgerEngineUpdateStats,
   LedgerPrice,
+  LedgerRegisterFilter,
   LedgerSourceDocument,
   LedgerTag,
+  LedgerTagFilter,
   LedgerVerificationBalanceDelta,
   LedgerVerificationCache,
   LedgerVerificationCheckpoint,
@@ -29,6 +32,7 @@ export type {
   LedgerVerificationTransactionDescriptor,
   ParseLedgerProgress,
   ParsedLedgerBalanceAssertion,
+  ParsedLedgerAccountDirective,
   ParsedLedgerFile,
   ParsedLedgerIncludeDirective,
   ParsedLedgerPosting,

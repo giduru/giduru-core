@@ -1,4 +1,4 @@
-# `@giduru/ledger-engine`
+# `giduru-core`
 
 Pure parsing and verification engine extracted from Giduru's app runtime.
 
@@ -7,7 +7,7 @@ Detailed architecture and performance notes live in [ARCHITECTURE.md](./ARCHITEC
 ## Install
 
 ```sh
-npm install @giduru/ledger-engine
+npm install giduru-core
 ```
 
 This package is maintained from the [`giduru/giduru-core`](https://github.com/giduru/giduru-core) repository.

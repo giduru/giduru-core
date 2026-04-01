@@ -5,7 +5,9 @@ import {
   analyzeLedgerDocuments,
   analyzeLedgerState,
   applyLedgerDocumentChanges,
+  createLedgerTagKey,
   createLedgerEngineState,
+  filterRegisterEntries,
 } from '../src';
 
 test('declaration directives are order-insensitive', async () => {
@@ -479,6 +481,125 @@ test('search indexes are populated for register and transaction outputs', async 
   assert.equal(
     analysis.index.registerPositionById[cashIds[0] ?? 'missing'] >= 0,
     true,
+  );
+});
+
+test('account directive type annotations drive posting account types', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2024-01-01 Paystub
+  Payroll:Gross  -100 USD
+  Taxes:Federal  30 USD
+  CashPool  70 USD
+
+account Payroll:Gross ; type:R
+account Taxes:Federal ; type:X
+account CashPool ; type:A
+commodity USD 1.00
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  assert.equal(
+    analysis.register.find((entry) => entry.account === 'Payroll:Gross')?.accountType,
+    'income',
+  );
+  assert.equal(
+    analysis.register.find((entry) => entry.account === 'Taxes:Federal')?.accountType,
+    'expense',
+  );
+  assert.equal(
+    analysis.register.find((entry) => entry.account === 'CashPool')?.accountType,
+    'asset',
+  );
+});
+
+test('posting tags include transitive account and transaction tags and are indexed/filterable', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2024-01-01 Paystub ; batch:paystub
+  Payroll:Gross  -100 USD ; portion:gross
+  Taxes:Federal  30 USD ; portion:withholding
+  Assets:Checking  70 USD
+
+account Payroll:Gross ; type:R, view:exclude
+  ; scope:taxable
+account Taxes:Federal ; type:X, category:tax
+account Assets:Checking ; type:A
+commodity USD 1.00
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const grossEntry = analysis.register.find((entry) => entry.account === 'Payroll:Gross');
+  const taxEntry = analysis.register.find((entry) => entry.account === 'Taxes:Federal');
+
+  assert.ok(grossEntry);
+  assert.ok(taxEntry);
+  assert.deepEqual(grossEntry.accountTags, [
+    { name: 'view', value: 'exclude' },
+    { name: 'scope', value: 'taxable' },
+  ]);
+  assert.deepEqual(grossEntry.transactionTags, [{ name: 'batch', value: 'paystub' }]);
+  assert.deepEqual(grossEntry.postingTags, [{ name: 'portion', value: 'gross' }]);
+  assert.deepEqual(grossEntry.tags, [
+    { name: 'view', value: 'exclude' },
+    { name: 'scope', value: 'taxable' },
+    { name: 'batch', value: 'paystub' },
+    { name: 'portion', value: 'gross' },
+  ]);
+  assert.equal(grossEntry.tags.some((tag) => tag.name === 'type'), false);
+  assert.deepEqual(
+    analysis.index.registerIdsByTag[createLedgerTagKey({ name: 'view', value: 'exclude' })],
+    [grossEntry.id],
+  );
+  assert.deepEqual(
+    analysis.index.registerIdsByTagName.portion,
+    [grossEntry.id, taxEntry.id],
+  );
+  assert.deepEqual(
+    filterRegisterEntries(analysis, {
+      includeTags: [
+        { name: 'batch', value: 'paystub' },
+        { name: 'portion' },
+      ],
+      excludeTags: [{ name: 'view', value: 'exclude' }],
+    }).map((entry) => entry.account),
+    ['Taxes:Federal'],
+  );
+  assert.deepEqual(
+    filterRegisterEntries(analysis, {
+      includeTags: [{ name: 'portion' }],
+    }).map((entry) => entry.account),
+    ['Payroll:Gross', 'Taxes:Federal'],
   );
 });
 

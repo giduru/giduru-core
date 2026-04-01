@@ -26,6 +26,11 @@ export type LedgerTag = {
   value: string;
 };
 
+export type LedgerTagFilter = {
+  name: string;
+  value?: string;
+};
+
 export type ParsedLedgerPrice = {
   amount: number;
   comment: string;
@@ -48,6 +53,16 @@ export type ParsedLedgerBalanceAssertion = {
   inclusive: boolean;
   operator: BalanceAssertionOperator;
   total: boolean;
+};
+
+export type ParsedLedgerAccountDirective = {
+  account: string;
+  comment: string;
+  line: number;
+  tags: LedgerTag[];
+  type: AccountType | null;
+  typeAnnotationValues: string[];
+  typeDiagnostic: null | string;
 };
 
 export type ParsedLedgerPosting = {
@@ -101,6 +116,7 @@ export type LedgerSourceDocument = {
 };
 
 export type ParsedLedgerFile = {
+  accountDirectives: ParsedLedgerAccountDirective[];
   declaredAccounts: string[];
   declaredCommodities: string[];
   directiveDiagnostics: LedgerDiagnostic[];
@@ -163,6 +179,7 @@ export type LedgerVerificationReplayBlock = {
 
 export type LedgerVerificationCache = {
   accountDeclarationSignature: string;
+  accountMetadataSignatures: Record<string, string>;
   checkpoints: LedgerVerificationCheckpoint[];
   declaredAccounts: Set<string>;
   declaredCommodities: Set<string>;
@@ -183,6 +200,7 @@ export type ParseLedgerProgress = {
 
 export type RegisterEntry = {
   account: string;
+  accountTags: LedgerTag[];
   accountType: AccountType;
   amount: number;
   balanceAssertion: null | ParsedLedgerBalanceAssertion;
@@ -195,6 +213,7 @@ export type RegisterEntry = {
   kind: PostingKind;
   line: number;
   path: string;
+  postingTags: LedgerTag[];
   searchText: string;
   tags: LedgerTag[];
   transactionComment: string;
@@ -258,6 +277,8 @@ export type LedgerAnalysisIndex = {
   registerIdsByCommodity: Record<string, string[]>;
   registerIdsByDate: Record<string, string[]>;
   registerIdsByPath: Record<string, string[]>;
+  registerIdsByTag: Record<string, string[]>;
+  registerIdsByTagName: Record<string, string[]>;
   registerPositionById: Record<string, number>;
   transactionIdsByDate: Record<string, string[]>;
   transactionIdsByPath: Record<string, string[]>;
@@ -299,6 +320,15 @@ export type LedgerAnalysis = {
 export type VerifyLedgerOptions = {
   availableFilePaths?: string[];
   rootFilePaths?: string[];
+};
+
+export type LedgerRegisterFilter = {
+  excludeAccountTypes?: AccountType[];
+  excludeAccounts?: string[];
+  excludeTags?: LedgerTagFilter[];
+  includeAccountTypes?: AccountType[];
+  includeAccounts?: string[];
+  includeTags?: LedgerTagFilter[];
 };
 
 export type LedgerDocumentChange =

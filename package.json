@@ -1,6 +1,6 @@
 {
-  "name": "@giduru/ledger-engine",
-  "version": "0.1.0",
+  "name": "giduru-core",
+  "version": "0.1.1",
   "description": "Pure hledger parsing and verification engine extracted from Giduru.",
   "keywords": [
     "giduru",
@@ -41,9 +41,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bench": "npm run build && node bench/run.js",
+    "prepare": "npm run build",
+    "pack:dry-run": "npm_config_cache=.npm-cache npm pack --dry-run",
+    "publish:check": "npm run typecheck && npm test && npm run pack:dry-run",
+    "publish:public": "npm_config_cache=.npm-cache npm publish --access public",
     "test": "npm run build && node --test dist/test/**/*.test.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run test"
+    "typecheck": "tsc -p tsconfig.json --noEmit --tsBuildInfoFile .tsconfig.typecheck.tsbuildinfo",
+    "prepublishOnly": "npm run publish:check"
   },
   "dependencies": {
     "@lezer/common": "^1.5.1",

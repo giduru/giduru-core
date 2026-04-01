@@ -1,9 +1,11 @@
+import { inferAccountTypeFromName } from './account';
 import type {
   AccountType,
   LedgerAnalysis,
   LedgerAnalysisIndex,
   LedgerDiagnostic,
   LedgerPrice,
+  LedgerTag,
   LedgerVerificationBalanceDelta,
   LedgerVerificationCache,
   LedgerVerificationCheckpoint,
@@ -24,9 +26,15 @@ const CHECKPOINT_INTERVAL = 128;
 const LEDGER_FILE_EXTENSIONS = new Set(['.hledger', '.journal', '.ledger']);
 const ACCOUNT_TYPE_CACHE = new Map<string, AccountType>();
 const ACCOUNT_ANCESTORS_CACHE = new Map<string, string[]>();
+const EMPTY_ACCOUNT_METADATA_SIGNATURE = JSON.stringify({ tags: [], type: null });
 
 type AccountBalanceMap = Map<string, Map<string, number>>;
 type CommodityTotals = Map<string, number>;
+
+type DeclaredAccountMetadata = {
+  tags: LedgerTag[];
+  type: AccountType | null;
+};
 
 type PendingPosting = {
   posting: ParsedLedgerPosting;
@@ -39,6 +47,7 @@ type VerificationRuntimeState = {
 
 type LedgerVerificationPlan = {
   accountDeclarationSignature: string;
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>;
   baseDiagnostics: LedgerDiagnostic[];
   commodityDeclarationSignature: string;
   declaredAccounts: Set<string>;
@@ -115,6 +124,7 @@ export function verifyLedgerWorkspaceWithCache(
     const fragment = reusableFragment
       ? reusableFragment.fragment
       : verifyTransactionFragment({
+          accountMetadataByName: plan.accountMetadataByName,
           declaredAccounts: plan.declaredAccounts,
           declaredCommodities: plan.declaredCommodities,
           hasAccountDeclarations: plan.hasAccountDeclarations,
@@ -148,6 +158,7 @@ export function verifyLedgerWorkspaceWithCache(
     analysis,
     cache: {
       accountDeclarationSignature: plan.accountDeclarationSignature,
+      accountMetadataSignatures: buildAccountMetadataSignatures(plan.accountMetadataByName),
       checkpoints,
       declaredAccounts: new Set(plan.declaredAccounts),
       declaredCommodities: new Set(plan.declaredCommodities),
@@ -233,6 +244,7 @@ function buildVerificationPlan(
   }
 
   const declaredAccounts = new Set<string>();
+  const accountMetadataByName = new Map<string, DeclaredAccountMetadata>();
   const declaredCommodities = new Set<string>();
   const directivePrices: LedgerPrice[] = [];
   const orderedTransactions: LedgerVerificationTransactionDescriptor[] = [];
@@ -247,6 +259,39 @@ function buildVerificationPlan(
 
     for (const account of parsedFile.declaredAccounts) {
       declaredAccounts.add(account);
+    }
+
+    for (const directive of parsedFile.accountDirectives) {
+      const existing = accountMetadataByName.get(directive.account);
+
+      if (!existing) {
+        accountMetadataByName.set(directive.account, {
+          tags: mergeLedgerTags(directive.tags),
+          type: directive.type,
+        });
+        continue;
+      }
+
+      existing.tags = mergeLedgerTags(existing.tags, directive.tags);
+
+      if (directive.type == null || existing.type === directive.type) {
+        continue;
+      }
+
+      if (existing.type == null) {
+        existing.type = directive.type;
+        continue;
+      }
+
+      existing.type = 'unknown';
+      baseDiagnostics.push(
+        createDiagnostic(
+          parsedFile.file.path,
+          `Account "${directive.account}" has conflicting type annotations across declarations.`,
+          directive.line,
+          'error',
+        ),
+      );
     }
 
     for (const commodity of parsedFile.declaredCommodities) {
@@ -280,7 +325,11 @@ function buildVerificationPlan(
   });
 
   return {
-    accountDeclarationSignature: buildDeclarationSignature(declaredAccounts),
+    accountDeclarationSignature: buildAccountDeclarationSignature(
+      declaredAccounts,
+      accountMetadataByName,
+    ),
+    accountMetadataByName,
     baseDiagnostics,
     commodityDeclarationSignature: buildDeclarationSignature(declaredCommodities),
     declaredAccounts,
@@ -554,6 +603,11 @@ function hasStableFragmentDeclarationContext(
   }
 
   return (
+    hasStableAccountMetadata(
+      fragment.accounts,
+      previousCache.accountMetadataSignatures,
+      plan.accountMetadataByName,
+    ) &&
     hasStableDeclarationStatuses(
       fragment.accounts,
       previousCache.hasAccountDeclarations,
@@ -569,6 +623,23 @@ function hasStableFragmentDeclarationContext(
       plan.declaredCommodities,
     )
   );
+}
+
+function hasStableAccountMetadata(
+  accounts: string[],
+  previousSignatures: Record<string, string>,
+  nextMetadataByName: Map<string, DeclaredAccountMetadata>,
+) {
+  for (const account of accounts) {
+    if (
+      (previousSignatures[account] ?? EMPTY_ACCOUNT_METADATA_SIGNATURE) !==
+      buildDeclaredAccountMetadataSignature(nextMetadataByName.get(account))
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function hasStableDeclarationStatuses(
@@ -733,6 +804,7 @@ function materializeLedgerAnalysis(
 }
 
 function verifyTransactionFragment(args: {
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>;
   declaredAccounts: Set<string>;
   declaredCommodities: Set<string>;
   hasAccountDeclarations: boolean;
@@ -743,6 +815,7 @@ function verifyTransactionFragment(args: {
   transactionId: string;
 }): LedgerVerificationFragment {
   const {
+    accountMetadataByName,
     declaredAccounts,
     declaredCommodities,
     hasAccountDeclarations,
@@ -821,6 +894,7 @@ function verifyTransactionFragment(args: {
         }
 
         applyPostingEntry({
+          accountMetadataByName,
           balanceDeltas,
           parsedFile,
           posting: {
@@ -846,6 +920,7 @@ function verifyTransactionFragment(args: {
     }
 
     applyPostingEntry({
+      accountMetadataByName,
       balanceDeltas,
       parsedFile,
       posting: posting as ParsedLedgerPosting & { amount: number; commodity: string },
@@ -863,6 +938,7 @@ function verifyTransactionFragment(args: {
 
   resolvePendingPostings({
     balanceDeltas,
+    accountMetadataByName,
     commodityPrecisions: realCommodityPrecisions,
     diagnostics,
     kind: 'real',
@@ -878,6 +954,7 @@ function verifyTransactionFragment(args: {
   });
   resolvePendingPostings({
     balanceDeltas,
+    accountMetadataByName,
     commodityPrecisions: balancedVirtualCommodityPrecisions,
     diagnostics,
     kind: 'balanced-virtual',
@@ -947,6 +1024,7 @@ function verifyTransactionFragment(args: {
 }
 
 function resolvePendingPostings(args: {
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>;
   balanceDeltas: LedgerVerificationBalanceDelta[];
   commodityPrecisions: Map<string, number>;
   diagnostics: LedgerDiagnostic[];
@@ -962,6 +1040,7 @@ function resolvePendingPostings(args: {
   transactionId: string;
 }) {
   const {
+    accountMetadataByName,
     balanceDeltas,
     commodityPrecisions,
     diagnostics,
@@ -1002,6 +1081,7 @@ function resolvePendingPostings(args: {
       const [inferredCommodity] = totalEntries[0];
 
       applyPostingEntry({
+        accountMetadataByName,
         balanceDeltas,
         parsedFile,
         posting: {
@@ -1059,6 +1139,7 @@ function resolvePendingPostings(args: {
   const [inferredCommodity, totalAmount] = nonZeroTotals[0];
 
   applyPostingEntry({
+    accountMetadataByName,
     balanceDeltas,
     parsedFile,
     posting: {
@@ -1129,6 +1210,7 @@ function validatePostingDeclarations(
 }
 
 function applyPostingEntry(args: {
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>;
   balanceDeltas: LedgerVerificationBalanceDelta[];
   parsedFile: ParsedLedgerFile;
   posting: ParsedLedgerPosting & { amount: number; commodity: string };
@@ -1142,6 +1224,7 @@ function applyPostingEntry(args: {
   wasInferred: boolean;
 }) {
   const {
+    accountMetadataByName,
     balanceDeltas,
     parsedFile,
     posting,
@@ -1154,10 +1237,13 @@ function applyPostingEntry(args: {
     transactionId,
     wasInferred,
   } = args;
+  const accountMetadata = accountMetadataByName.get(posting.account);
+  const effectiveTags = mergeLedgerTags(accountMetadata?.tags ?? [], transaction.tags, posting.tags);
   const entryId = `${parsedFile.file.path}:${transaction.headerLine}:${posting.line}`;
   const entry: RegisterEntry = {
     account: posting.account,
-    accountType: classifyAccount(posting.account),
+    accountTags: accountMetadata?.tags ?? [],
+    accountType: resolvePostingAccountType(posting.account, accountMetadata),
     amount: posting.amount,
     balanceAssertion: posting.balanceAssertion,
     comment: posting.comment,
@@ -1169,6 +1255,7 @@ function applyPostingEntry(args: {
     kind: posting.kind,
     line: posting.line,
     path: parsedFile.file.path,
+    postingTags: posting.tags,
     searchText: buildSearchText([
       posting.account,
       posting.comment,
@@ -1177,10 +1264,9 @@ function applyPostingEntry(args: {
       transaction.secondaryDate ?? '',
       transaction.description,
       transaction.comment,
-      ...posting.tags.map((tag) => `${tag.name}:${tag.value}`),
-      ...transaction.tags.map((tag) => `${tag.name}:${tag.value}`),
+      ...effectiveTags.map((tag) => `${tag.name}:${tag.value}`),
     ]),
-    tags: posting.tags,
+    tags: effectiveTags,
     transactionComment: transaction.comment,
     transactionId,
     transactionTags: transaction.tags,
@@ -1748,6 +1834,17 @@ function hasLedgerExtension(path: string) {
   return LEDGER_FILE_EXTENSIONS.has(name.slice(dotIndex).toLowerCase());
 }
 
+function resolvePostingAccountType(
+  account: string,
+  metadata: DeclaredAccountMetadata | undefined,
+): AccountType {
+  if (metadata?.type) {
+    return metadata.type;
+  }
+
+  return classifyAccount(account);
+}
+
 function classifyAccount(account: string): AccountType {
   const cached = ACCOUNT_TYPE_CACHE.get(account);
 
@@ -1755,35 +1852,7 @@ function classifyAccount(account: string): AccountType {
     return cached;
   }
 
-  const firstSegment = account.split(':')[0].toLowerCase().trim();
-  let accountType: AccountType;
-
-  switch (firstSegment) {
-    case 'asset':
-    case 'assets':
-      accountType = 'asset';
-      break;
-    case 'liability':
-    case 'liabilities':
-      accountType = 'liability';
-      break;
-    case 'equity':
-      accountType = 'equity';
-      break;
-    case 'revenue':
-    case 'revenues':
-    case 'income':
-      accountType = 'income';
-      break;
-    case 'expense':
-    case 'expenses':
-      accountType = 'expense';
-      break;
-    default:
-      accountType = 'unknown';
-      break;
-  }
-
+  const accountType = inferAccountTypeFromName(account);
   ACCOUNT_TYPE_CACHE.set(account, accountType);
   return accountType;
 }
@@ -1809,6 +1878,8 @@ function buildAnalysisIndex(
     registerIdsByCommodity: {},
     registerIdsByDate: {},
     registerIdsByPath: {},
+    registerIdsByTag: {},
+    registerIdsByTagName: {},
     registerPositionById: {},
     transactionIdsByDate: {},
     transactionIdsByPath: {},
@@ -1827,6 +1898,18 @@ function buildAnalysisIndex(
     appendIndexId(index.registerIdsByCommodity, entry.commodity, entry.id);
     appendIndexId(index.registerIdsByDate, entry.date, entry.id);
     appendIndexId(index.registerIdsByPath, entry.path, entry.id);
+    const seenTagNames = new Set<string>();
+
+    for (const tag of entry.tags) {
+      appendIndexId(index.registerIdsByTag, buildLedgerTagKey(tag), entry.id);
+
+      if (seenTagNames.has(tag.name)) {
+        continue;
+      }
+
+      seenTagNames.add(tag.name);
+      appendIndexId(index.registerIdsByTagName, tag.name, entry.id);
+    }
   });
 
   transactions.forEach((transaction, position) => {
@@ -1853,8 +1936,69 @@ function appendIndexId(
   target[key] = [id];
 }
 
+function buildAccountDeclarationSignature(
+  declaredAccounts: Set<string>,
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>,
+) {
+  return Array.from(declaredAccounts)
+    .sort((left, right) => left.localeCompare(right))
+    .map(
+      (account) =>
+        `${account}\n${buildDeclaredAccountMetadataSignature(accountMetadataByName.get(account))}`,
+    )
+    .join('\n\n');
+}
+
+function buildDeclaredAccountMetadataSignature(metadata: DeclaredAccountMetadata | undefined) {
+  if (!metadata) {
+    return EMPTY_ACCOUNT_METADATA_SIGNATURE;
+  }
+
+  return JSON.stringify({
+    tags: Array.from(new Set(metadata.tags.map((tag) => buildLedgerTagKey(tag)))).sort(
+      (left, right) => left.localeCompare(right),
+    ),
+    type: metadata.type,
+  });
+}
+
+function buildAccountMetadataSignatures(
+  accountMetadataByName: Map<string, DeclaredAccountMetadata>,
+) {
+  return Object.fromEntries(
+    Array.from(accountMetadataByName.entries()).map(([account, metadata]) => [
+      account,
+      buildDeclaredAccountMetadataSignature(metadata),
+    ]),
+  );
+}
+
 function buildDeclarationSignature(values: Set<string>) {
   return Array.from(values).sort((left, right) => left.localeCompare(right)).join('\n');
+}
+
+function buildLedgerTagKey(tag: Pick<LedgerTag, 'name' | 'value'>) {
+  return `${tag.name}:${tag.value}`;
+}
+
+function mergeLedgerTags(...groups: LedgerTag[][]) {
+  const merged: LedgerTag[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups) {
+    for (const tag of group) {
+      const key = buildLedgerTagKey(tag);
+
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      merged.push(tag);
+    }
+  }
+
+  return merged;
 }
 
 function appendDateEntries<T>(
