@@ -218,6 +218,116 @@ test('total price annotations inherit the posting sign for balancing', async () 
   );
 });
 
+test('conflicting price directives are reported as diagnostics', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `P 2024-01-01 USD 1.25 CAD
+P 2024-01-01 USD 1.30 CAD
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const diagnostics = analysis.diagnostics.filter((diagnostic) =>
+    diagnostic.message.includes('Conflicting prices for USD -> CAD on 2024-01-01'),
+  );
+
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.line),
+    [1, 2],
+  );
+});
+
+test('conflicts between P directives and @ annotations are reported as diagnostics', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `P 2024-01-01 VEQT 35 CAD
+
+2024-01-01 Buy
+  Assets:Brokerage  1 VEQT @ CAD 36
+  Assets:Cash  CAD -36
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const diagnostics = analysis.diagnostics.filter((diagnostic) =>
+    diagnostic.message.includes('Conflicting prices for VEQT -> CAD on 2024-01-01'),
+  );
+
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.line),
+    [1, 4],
+  );
+});
+
+test('conflicts between @ and @@ annotations are reported as diagnostics', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `2024-01-01 Buy
+  Assets:Brokerage  2 VEQT @ CAD 10
+  Assets:Cash  CAD -20
+
+2024-01-01 Buy more
+  Assets:Brokerage  2 VEQT @@ CAD 24
+  Assets:Cash  CAD -24
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const diagnostics = analysis.diagnostics.filter((diagnostic) =>
+    diagnostic.message.includes('Conflicting prices for VEQT -> CAD on 2024-01-01'),
+  );
+
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.line),
+    [2, 6],
+  );
+});
+
 test('simple balance assignments are inferred from assertions', async () => {
   const documents = new Map([
     [

@@ -747,13 +747,14 @@ function materializeLedgerAnalysis(
     }
   }
 
-  const sortedDiagnostics = diagnostics.sort(compareDiagnostics);
   const sortedDatesDescending = Array.from(transactionDates).sort((left, right) =>
     right.localeCompare(left),
   );
   const sortedRegister = materializeEntriesByDate(sortedDatesDescending, registerByDate);
   const sortedTransactions = materializeEntriesByDate(sortedDatesDescending, transactionsByDate);
   const sortedPrices = mergeSortedPrices(plan.directivePrices, postingPrices);
+  diagnostics.push(...detectConflictingPriceDiagnostics(sortedPrices));
+  const sortedDiagnostics = diagnostics.sort(compareDiagnostics);
 
   return {
     accounts: Array.from(accounts).sort((left, right) => left.localeCompare(right)),
@@ -1821,6 +1822,66 @@ function comparePrices(left: LedgerPrice, right: LedgerPrice) {
   }
 
   return left.date.localeCompare(right.date);
+}
+
+function detectConflictingPriceDiagnostics(prices: LedgerPrice[]) {
+  const diagnostics: LedgerDiagnostic[] = [];
+  const pricesByKey = new Map<string, LedgerPrice[]>();
+
+  for (const price of prices) {
+    const key = `${price.date}:${price.fromCommodity}:${price.toCommodity ?? ''}`;
+    const bucket = pricesByKey.get(key);
+
+    if (bucket) {
+      bucket.push(price);
+      continue;
+    }
+
+    pricesByKey.set(key, [price]);
+  }
+
+  for (const bucket of pricesByKey.values()) {
+    const distinctAmounts = collectDistinctPriceAmounts(bucket);
+
+    if (distinctAmounts.length < 2) {
+      continue;
+    }
+
+    const message = buildConflictingPriceMessage(bucket[0], distinctAmounts);
+
+    for (const price of bucket) {
+      diagnostics.push(createDiagnostic(price.path, message, price.line, 'error'));
+    }
+  }
+
+  return diagnostics;
+}
+
+function collectDistinctPriceAmounts(prices: LedgerPrice[]) {
+  const distinctAmounts: number[] = [];
+
+  for (const price of prices) {
+    if (distinctAmounts.some((amount) => Math.abs(amount - price.amount) <= BALANCE_EPSILON)) {
+      continue;
+    }
+
+    distinctAmounts.push(price.amount);
+  }
+
+  return distinctAmounts.sort((left, right) => left - right);
+}
+
+function buildConflictingPriceMessage(
+  price: LedgerPrice,
+  amounts: number[],
+) {
+  const targetCommodity = price.toCommodity ?? '';
+  const pair = `${price.fromCommodity} -> ${price.toCommodity ?? '""'}`;
+  const values = amounts
+    .map((amount) => formatCommodityAmount(targetCommodity, amount))
+    .join(', ');
+
+  return `Conflicting prices for ${pair} on ${price.date}. Found: ${values}.`;
 }
 
 function hasLedgerExtension(path: string) {
