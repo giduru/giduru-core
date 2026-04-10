@@ -3,12 +3,16 @@ import test from 'node:test';
 
 import {
   analyzeLedgerDocuments,
+  createLedgerTagKey,
+  filterPostings,
+  resolveLatestLedgerPrice,
+  resolveLedgerPriceOnDate,
+} from '../src';
+import {
   analyzeLedgerState,
   applyLedgerDocumentChanges,
-  createLedgerTagKey,
   createLedgerEngineState,
-  filterRegisterEntries,
-} from '../src';
+} from '../src/engine';
 
 test('declaration directives are order-insensitive', async () => {
   const documents = new Map([
@@ -42,7 +46,7 @@ commodity $1.00
     analysis.diagnostics.some((diagnostic) => diagnostic.message.includes('Undeclared')),
     false,
   );
-  assert.equal(analysis.register.length, 2);
+  assert.equal(analysis.postings.length, 2);
 });
 
 test('missing amounts are inferred inside the real-posting balance group', async () => {
@@ -69,7 +73,7 @@ test('missing amounts are inferred inside the real-posting balance group', async
     },
   });
 
-  const inferred = analysis.register.find((entry) => entry.account === 'Assets:Cash');
+  const inferred = analysis.postings.find((entry) => entry.account === 'Assets:Cash');
   assert.ok(inferred);
   assert.equal(inferred.amount, -10);
   assert.equal(inferred.inferredAmount, true);
@@ -99,7 +103,7 @@ test('missing amounts can infer zero when balancing against a single zero commod
     },
   });
 
-  const inferred = analysis.register.find((entry) => entry.account === 'equity:opening-balances');
+  const inferred = analysis.postings.find((entry) => entry.account === 'equity:opening-balances');
   assert.ok(inferred);
   assert.equal(inferred.amount, 0);
   assert.equal(inferred.commodity, 'CAD');
@@ -340,6 +344,78 @@ test('same-day @@ posting-derived prices do not conflict and later prices win', 
   assert.equal(sameDayPrices.at(-1)?.line, 6);
 });
 
+test('price resolution prefers P directives, otherwise later posting-derived prices', async () => {
+  const directiveDocuments = new Map([
+    [
+      'main.journal',
+      {
+        content: `P 2024-01-01 VEQT 35 CAD
+
+2024-01-01 Buy
+  Assets:Brokerage  1 VEQT @@ CAD 36
+  Assets:Cash  CAD -36
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+  const postingDocuments = new Map([
+    [
+      'main.journal',
+      {
+        content: `2024-01-01 Buy
+  Assets:Brokerage  2 VEQT @@ CAD 20
+  Assets:Cash  CAD -20
+
+2024-01-01 Buy more
+  Assets:Brokerage  2 VEQT @@ CAD 24
+  Assets:Cash  CAD -24
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+  ]);
+
+  const { analysis: directiveAnalysis } = await analyzeLedgerDocuments(directiveDocuments, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+  const { analysis: postingAnalysis } = await analyzeLedgerDocuments(postingDocuments, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  const directivePrice = resolveLedgerPriceOnDate(directiveAnalysis, {
+    date: '2024-01-01',
+    fromCommodity: 'VEQT',
+    toCommodity: 'CAD',
+  });
+  const postingPrice = resolveLatestLedgerPrice(postingAnalysis, {
+    date: '2024-01-01',
+    fromCommodity: 'VEQT',
+    toCommodity: 'CAD',
+  });
+
+  assert.ok(directivePrice);
+  assert.equal(directivePrice.source, 'directive');
+  assert.equal(directivePrice.amount, 35);
+  assert.equal(directivePrice.line, 1);
+  assert.ok(postingPrice);
+  assert.equal(postingPrice.source, 'posting-annotation');
+  assert.equal(postingPrice.amount, 12);
+  assert.equal(postingPrice.line, 6);
+});
+
 test('simple balance assignments are inferred from assertions', async () => {
   const documents = new Map([
     [
@@ -363,9 +439,9 @@ test('simple balance assignments are inferred from assertions', async () => {
     },
   });
 
-  assert.equal(analysis.register.length, 1);
-  assert.equal(analysis.register[0]?.amount, 1);
-  assert.equal(analysis.register[0]?.inferredAmount, true);
+  assert.equal(analysis.postings.length, 1);
+  assert.equal(analysis.postings[0]?.amount, 1);
+  assert.equal(analysis.postings[0]?.inferredAmount, true);
 });
 
 test('failed balance assertions surface as diagnostics', async () => {
@@ -431,6 +507,62 @@ test('unmatched include globs become parser diagnostics', async () => {
     ),
     true,
   );
+});
+
+test('commodity and include metadata are promoted into analysis output', async () => {
+  const documents = new Map([
+    [
+      'main.journal',
+      {
+        content: `include nested/other.journal
+commodity USD
+
+2024-01-01
+  Assets:Cash  1 USD
+  Income:Other  -1 USD
+`,
+        isLedger: true,
+        name: 'main.journal',
+        path: 'main.journal',
+      },
+    ],
+    [
+      'nested/other.journal',
+      {
+        content: `commodity EUR
+`,
+        isLedger: true,
+        name: 'other.journal',
+        path: 'nested/other.journal',
+      },
+    ],
+  ]);
+
+  const { analysis } = await analyzeLedgerDocuments(documents, {
+    rootFilePaths: ['main.journal'],
+    verifyOptions: {
+      availableFilePaths: ['main.journal', 'nested/other.journal'],
+      rootFilePaths: ['main.journal'],
+    },
+  });
+
+  assert.deepEqual(analysis.includes.map((record) => record.path), ['main.journal']);
+  assert.equal(analysis.includes[0]?.resolved, 'nested/other.journal');
+  assert.deepEqual(analysis.includes[0]?.matches, ['nested/other.journal']);
+
+  const usd = analysis.commodities.find((commodity) => commodity.commodity === 'USD');
+  const eur = analysis.commodities.find((commodity) => commodity.commodity === 'EUR');
+
+  assert.ok(usd);
+  assert.equal(usd.declared, true);
+  assert.equal(usd.used, true);
+  assert.equal(usd.postingCount, 2);
+  assert.deepEqual(usd.paths, ['main.journal']);
+  assert.ok(eur);
+  assert.equal(eur.declared, true);
+  assert.equal(eur.used, false);
+  assert.equal(eur.postingCount, 0);
+  assert.deepEqual(eur.paths, ['nested/other.journal']);
 });
 
 test('undeclared accounts are reported even when validation is order-insensitive', async () => {
@@ -571,7 +703,7 @@ test('balanced virtual postings must balance among themselves', async () => {
   );
 });
 
-test('search indexes are populated for register and transaction outputs', async () => {
+test('search indexes are populated for postings and transaction outputs', async () => {
   const documents = new Map([
     [
       'main.journal',
@@ -595,13 +727,13 @@ test('search indexes are populated for register and transaction outputs', async 
     },
   });
 
-  const cashIds = analysis.index.registerIdsByAccount['Assets:Cash'] ?? [];
+  const cashIds = analysis.index.postingIdsByAccount['Assets:Cash'] ?? [];
   const transactionIds = analysis.index.transactionIdsByPath['main.journal'] ?? [];
 
   assert.equal(cashIds.length, 1);
   assert.equal(transactionIds.length, 1);
   assert.equal(
-    analysis.index.registerPositionById[cashIds[0] ?? 'missing'] >= 0,
+    analysis.index.postingPositionById[cashIds[0] ?? 'missing'] >= 0,
     true,
   );
 });
@@ -637,15 +769,15 @@ commodity USD 1.00
   });
 
   assert.equal(
-    analysis.register.find((entry) => entry.account === 'Payroll:Gross')?.accountType,
+    analysis.postings.find((entry) => entry.account === 'Payroll:Gross')?.accountType,
     'income',
   );
   assert.equal(
-    analysis.register.find((entry) => entry.account === 'Taxes:Federal')?.accountType,
+    analysis.postings.find((entry) => entry.account === 'Taxes:Federal')?.accountType,
     'expense',
   );
   assert.equal(
-    analysis.register.find((entry) => entry.account === 'CashPool')?.accountType,
+    analysis.postings.find((entry) => entry.account === 'CashPool')?.accountType,
     'asset',
   );
 });
@@ -817,7 +949,7 @@ commodity USD 1.00
   assert.equal(entry.effectiveType, 'unknown');
   assert.deepEqual(entry.typeAnnotationValues, ['A', 'X']);
   assert.equal(
-    analysis.register.find((registerEntry) => registerEntry.account === 'CashPool')?.accountType,
+    analysis.postings.find((registerEntry) => registerEntry.account === 'CashPool')?.accountType,
     'unknown',
   );
   assert.equal(
@@ -975,8 +1107,8 @@ commodity USD 1.00
     },
   });
 
-  const grossEntry = analysis.register.find((entry) => entry.account === 'Payroll:Gross');
-  const taxEntry = analysis.register.find((entry) => entry.account === 'Taxes:Federal');
+  const grossEntry = analysis.postings.find((entry) => entry.account === 'Payroll:Gross');
+  const taxEntry = analysis.postings.find((entry) => entry.account === 'Taxes:Federal');
 
   assert.ok(grossEntry);
   assert.ok(taxEntry);
@@ -994,15 +1126,15 @@ commodity USD 1.00
   ]);
   assert.equal(grossEntry.tags.some((tag) => tag.name === 'type'), false);
   assert.deepEqual(
-    analysis.index.registerIdsByTag[createLedgerTagKey({ name: 'view', value: 'exclude' })],
+    analysis.index.postingIdsByTag[createLedgerTagKey({ name: 'view', value: 'exclude' })],
     [grossEntry.id],
   );
   assert.deepEqual(
-    analysis.index.registerIdsByTagName.portion,
+    analysis.index.postingIdsByTagName.portion,
     [grossEntry.id, taxEntry.id],
   );
   assert.deepEqual(
-    filterRegisterEntries(analysis, {
+    filterPostings(analysis, {
       includeTags: [
         { name: 'batch', value: 'paystub' },
         { name: 'portion' },
@@ -1012,7 +1144,7 @@ commodity USD 1.00
     ['Taxes:Federal'],
   );
   assert.deepEqual(
-    filterRegisterEntries(analysis, {
+    filterPostings(analysis, {
       includeTags: [{ name: 'portion' }],
     }).map((entry) => entry.account),
     ['Payroll:Gross', 'Taxes:Federal'],

@@ -65,6 +65,11 @@ export type ParsedLedgerAccountDirective = {
   typeDiagnostic: null | string;
 };
 
+export type ParsedLedgerCommodityDirective = {
+  commodity: string;
+  line: number;
+};
+
 export type ParsedLedgerPosting = {
   account: string;
   amount: null | number;
@@ -117,6 +122,7 @@ export type LedgerSourceDocument = {
 
 export type ParsedLedgerFile = {
   accountDirectives: ParsedLedgerAccountDirective[];
+  commodityDirectives: ParsedLedgerCommodityDirective[];
   declaredAccounts: string[];
   declaredCommodities: string[];
   directiveDiagnostics: LedgerDiagnostic[];
@@ -161,7 +167,7 @@ export type LedgerVerificationFragment = {
   diagnostics: LedgerDiagnostic[];
   postingCount: number;
   prices: LedgerPrice[];
-  register: RegisterEntry[];
+  postings: Posting[];
   transaction: null | Transaction;
 };
 
@@ -198,7 +204,7 @@ export type ParseLedgerProgress = {
   phase: 'complete' | 'parsing';
 };
 
-export type RegisterEntry = {
+export type Posting = {
   account: string;
   accountTags: LedgerTag[];
   accountType: AccountType;
@@ -229,7 +235,7 @@ export type Transaction = {
   id: string;
   line: number;
   path: string;
-  postings: RegisterEntry[];
+  postings: Posting[];
   searchText: string;
   secondaryDate: null | string;
   tags: LedgerTag[];
@@ -298,6 +304,30 @@ export type LedgerAccountCatalogEntry = {
   used: boolean;
 };
 
+export type LedgerCommodityDirectiveRecord = {
+  commodity: string;
+  line: number;
+  path: string;
+};
+
+export type LedgerCommodityCatalogEntry = {
+  commodity: string;
+  declarationCount: number;
+  declarations: LedgerCommodityDirectiveRecord[];
+  declared: boolean;
+  id: string;
+  paths: string[];
+  postingCount: number;
+  priceCount: number;
+  pricedAgainst: string[];
+  used: boolean;
+};
+
+export type LedgerIncludeRecord = ParsedLedgerIncludeDirective & {
+  id: string;
+  path: string;
+};
+
 export type LedgerAnalysisIndex = {
   accountCatalogIdsByEffectiveType: Record<string, string[]>;
   accountCatalogIdsByPath: Record<string, string[]>;
@@ -306,14 +336,14 @@ export type LedgerAnalysisIndex = {
   accountCatalogPositionById: Record<string, number>;
   diagnosticPositionById: Record<string, number>;
   diagnosticsByPath: Record<string, string[]>;
-  registerIdsByAccount: Record<string, string[]>;
-  registerIdsByAccountType: Record<string, string[]>;
-  registerIdsByCommodity: Record<string, string[]>;
-  registerIdsByDate: Record<string, string[]>;
-  registerIdsByPath: Record<string, string[]>;
-  registerIdsByTag: Record<string, string[]>;
-  registerIdsByTagName: Record<string, string[]>;
-  registerPositionById: Record<string, number>;
+  postingIdsByAccount: Record<string, string[]>;
+  postingIdsByAccountType: Record<string, string[]>;
+  postingIdsByCommodity: Record<string, string[]>;
+  postingIdsByDate: Record<string, string[]>;
+  postingIdsByPath: Record<string, string[]>;
+  postingIdsByTag: Record<string, string[]>;
+  postingIdsByTagName: Record<string, string[]>;
+  postingPositionById: Record<string, number>;
   transactionIdsByDate: Record<string, string[]>;
   transactionIdsByPath: Record<string, string[]>;
   transactionPositionById: Record<string, number>;
@@ -323,6 +353,7 @@ export type LedgerAnalysis = {
   accounts: string[];
   accountCatalog: LedgerAccountCatalogEntry[];
   balances: AccountBalance[];
+  commodities: LedgerCommodityCatalogEntry[];
   declaredAccounts: string[];
   declaredCommodities: string[];
   diagnostics: LedgerDiagnostic[];
@@ -331,6 +362,7 @@ export type LedgerAnalysis = {
     includedFiles: string[];
     rootFiles: string[];
   };
+  includes: LedgerIncludeRecord[];
   index: LedgerAnalysisIndex;
   parserSummary: {
     errorNodeCount: number;
@@ -338,8 +370,8 @@ export type LedgerAnalysis = {
     nodeCount: number;
     reusedFileCount: number;
   };
+  postings: Posting[];
   prices: LedgerPrice[];
-  register: RegisterEntry[];
   summary: {
     postingCount: number;
     transactionCount: number;
@@ -357,13 +389,26 @@ export type VerifyLedgerOptions = {
   rootFilePaths?: string[];
 };
 
-export type LedgerRegisterFilter = {
+export type LedgerPostingFilter = {
   excludeAccountTypes?: AccountType[];
   excludeAccounts?: string[];
   excludeTags?: LedgerTagFilter[];
   includeAccountTypes?: AccountType[];
   includeAccounts?: string[];
   includeTags?: LedgerTagFilter[];
+};
+
+export type AnalyzeLedgerDocumentsOptions = {
+  onProgress?: (progress: ParseLedgerProgress) => void;
+  rootFilePaths?: string[];
+  verifyOptions?: VerifyLedgerOptions;
+};
+
+export type LedgerPriceResolutionQuery = {
+  date: string;
+  fromCommodity: string;
+  mode?: 'exact' | 'latest-on-or-before';
+  toCommodity?: null | string;
 };
 
 export type LedgerDocumentChange =

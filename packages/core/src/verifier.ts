@@ -5,7 +5,10 @@ import type {
   LedgerAccountCatalogEntry,
   LedgerAccountDirectiveRecord,
   LedgerAnalysisIndex,
+  LedgerCommodityCatalogEntry,
+  LedgerCommodityDirectiveRecord,
   LedgerDiagnostic,
+  LedgerIncludeRecord,
   LedgerPrice,
   LedgerTag,
   LedgerVerificationBalanceDelta,
@@ -18,7 +21,7 @@ import type {
   ParsedLedgerPosting,
   ParsedLedgerTransaction,
   ParsedLedgerWorkspace,
-  RegisterEntry,
+  Posting,
   Transaction,
   VerifyLedgerOptions,
 } from './types';
@@ -837,7 +840,7 @@ function materializeLedgerAnalysis(
   const accounts = new Set<string>();
   const diagnostics = [...plan.baseDiagnostics];
   const postingAnnotationPrices: LedgerPrice[] = [];
-  const registerByDate = new Map<string, RegisterEntry[]>();
+  const postingsByDate = new Map<string, Posting[]>();
   const transactionDates = new Set<string>();
   const transactionsByDate = new Map<string, Transaction[]>();
 
@@ -850,7 +853,7 @@ function materializeLedgerAnalysis(
     postingAnnotationPrices.push(...fragment.prices);
 
     if (fragment.transaction) {
-      appendDateEntries(registerByDate, fragment.transaction.date, fragment.register);
+      appendDateEntries(postingsByDate, fragment.transaction.date, fragment.postings);
       appendDateEntries(transactionsByDate, fragment.transaction.date, [fragment.transaction]);
       transactionDates.add(fragment.transaction.date);
     }
@@ -859,7 +862,7 @@ function materializeLedgerAnalysis(
   const sortedDatesDescending = Array.from(transactionDates).sort((left, right) =>
     right.localeCompare(left),
   );
-  const sortedRegister = materializeEntriesByDate(sortedDatesDescending, registerByDate);
+  const sortedPostings = materializeEntriesByDate(sortedDatesDescending, postingsByDate);
   const sortedTransactions = materializeEntriesByDate(sortedDatesDescending, transactionsByDate);
   const sortedPrices = mergeSortedPrices(plan.directivePrices, postingAnnotationPrices);
   diagnostics.push(...detectConflictingPriceDiagnostics(sortedPrices));
@@ -867,8 +870,10 @@ function materializeLedgerAnalysis(
   const accountCatalog = materializeAccountCatalog(
     plan.declaredAccounts,
     plan.accountMetadataByName,
-    sortedRegister,
+    sortedPostings,
   );
+  const commodityCatalog = materializeCommodityCatalog(workspace.files, sortedPostings, sortedPrices);
+  const includeRecords = materializeIncludeRecords(workspace.files);
 
   return {
     accounts: Array.from(accounts).sort((left, right) => left.localeCompare(right)),
@@ -886,6 +891,7 @@ function materializeLedgerAnalysis(
 
         return left.account.localeCompare(right.account);
       }),
+    commodities: commodityCatalog,
     declaredAccounts: Array.from(plan.declaredAccounts).sort((left, right) =>
       left.localeCompare(right),
     ),
@@ -894,10 +900,11 @@ function materializeLedgerAnalysis(
     ),
     diagnostics: sortedDiagnostics,
     graph: plan.graph,
+    includes: includeRecords,
     index: buildAnalysisIndex(
       sortedDiagnostics,
       accountCatalog,
-      sortedRegister,
+      sortedPostings,
       sortedTransactions,
     ),
     parserSummary: {
@@ -910,7 +917,7 @@ function materializeLedgerAnalysis(
       reusedFileCount: workspace.reusedFileCount,
     },
     prices: sortedPrices,
-    register: sortedRegister,
+    postings: sortedPostings,
     summary: {
       postingCount: plan.postingCount,
       transactionCount: plan.transactionCount,
@@ -927,9 +934,9 @@ function materializeLedgerAnalysis(
 function materializeAccountCatalog(
   declaredAccounts: Set<string>,
   accountMetadataByName: Map<string, DeclaredAccountMetadata>,
-  register: RegisterEntry[],
+  postings: Posting[],
 ) {
-  const usageByAccount = collectAccountUsage(register);
+  const usageByAccount = collectAccountUsage(postings);
   const accounts = new Set<string>([
     ...declaredAccounts,
     ...usageByAccount.keys(),
@@ -968,14 +975,14 @@ function materializeAccountCatalog(
     });
 }
 
-function collectAccountUsage(register: RegisterEntry[]) {
+function collectAccountUsage(postings: Posting[]) {
   const usageByAccount = new Map<
     string,
     { commoditiesUsed: string[]; postingCount: number; seenCommodities: Set<string> }
   >();
 
-  for (const registerPosting of register) {
-    let usage = usageByAccount.get(registerPosting.account);
+  for (const postingRecord of postings) {
+    let usage = usageByAccount.get(postingRecord.account);
 
     if (!usage) {
       usage = {
@@ -983,14 +990,14 @@ function collectAccountUsage(register: RegisterEntry[]) {
         postingCount: 0,
         seenCommodities: new Set<string>(),
       };
-      usageByAccount.set(registerPosting.account, usage);
+      usageByAccount.set(postingRecord.account, usage);
     }
 
     usage.postingCount += 1;
 
-    if (!usage.seenCommodities.has(registerPosting.commodity)) {
-      usage.seenCommodities.add(registerPosting.commodity);
-      usage.commoditiesUsed.push(registerPosting.commodity);
+    if (!usage.seenCommodities.has(postingRecord.commodity)) {
+      usage.seenCommodities.add(postingRecord.commodity);
+      usage.commoditiesUsed.push(postingRecord.commodity);
     }
   }
 
@@ -1003,6 +1010,137 @@ function collectAccountUsage(register: RegisterEntry[]) {
       },
     ]),
   );
+}
+
+function materializeCommodityCatalog(
+  parsedFiles: ParsedLedgerFile[],
+  postings: Posting[],
+  prices: LedgerPrice[],
+) {
+  const declarationsByCommodity = new Map<string, LedgerCommodityDirectiveRecord[]>();
+  const usageByCommodity = new Map<
+    string,
+    { postingCount: number; priceCount: number; pricedAgainst: Set<string> }
+  >();
+
+  for (const parsedFile of parsedFiles) {
+    for (const directive of parsedFile.commodityDirectives) {
+      const declaration = {
+        commodity: directive.commodity,
+        line: directive.line,
+        path: parsedFile.file.path,
+      } satisfies LedgerCommodityDirectiveRecord;
+      const declarations = declarationsByCommodity.get(directive.commodity);
+
+      if (declarations) {
+        declarations.push(declaration);
+        continue;
+      }
+
+      declarationsByCommodity.set(directive.commodity, [declaration]);
+    }
+  }
+
+  for (const posting of postings) {
+    appendCommodityUsage(usageByCommodity, posting.commodity, null, 'posting');
+  }
+
+  for (const price of prices) {
+    appendCommodityUsage(usageByCommodity, price.fromCommodity, price.toCommodity ?? null, 'price');
+
+    if (price.toCommodity) {
+      appendCommodityUsage(usageByCommodity, price.toCommodity, price.fromCommodity, 'price');
+    }
+  }
+
+  const commodities = new Set<string>([
+    ...declarationsByCommodity.keys(),
+    ...usageByCommodity.keys(),
+  ]);
+
+  return Array.from(commodities)
+    .sort((left, right) => left.localeCompare(right))
+    .map((commodity) => {
+      const declarations = declarationsByCommodity.get(commodity) ?? [];
+      const usage = usageByCommodity.get(commodity);
+
+      return {
+        commodity,
+        declarationCount: declarations.length,
+        declarations: declarations.map(copyLedgerCommodityDirectiveRecord),
+        declared: declarations.length > 0,
+        id: commodity,
+        paths: collectUniqueValues(declarations.map((declaration) => declaration.path)),
+        postingCount: usage?.postingCount ?? 0,
+        priceCount: usage?.priceCount ?? 0,
+        pricedAgainst: Array.from(usage?.pricedAgainst ?? []).sort((left, right) =>
+          left.localeCompare(right),
+        ),
+        used: usage != null,
+      } satisfies LedgerCommodityCatalogEntry;
+    });
+}
+
+function appendCommodityUsage(
+  usageByCommodity: Map<
+    string,
+    { postingCount: number; priceCount: number; pricedAgainst: Set<string> }
+  >,
+  commodity: string,
+  pricedAgainst: null | string,
+  source: 'posting' | 'price',
+) {
+  if (!commodity) {
+    return;
+  }
+
+  let usage = usageByCommodity.get(commodity);
+
+  if (!usage) {
+    usage = {
+      postingCount: 0,
+      priceCount: 0,
+      pricedAgainst: new Set<string>(),
+    };
+    usageByCommodity.set(commodity, usage);
+  }
+
+  if (source === 'posting') {
+    usage.postingCount += 1;
+  } else {
+    usage.priceCount += 1;
+  }
+
+  if (pricedAgainst) {
+    usage.pricedAgainst.add(pricedAgainst);
+  }
+}
+
+function copyLedgerCommodityDirectiveRecord(
+  declaration: LedgerCommodityDirectiveRecord,
+): LedgerCommodityDirectiveRecord {
+  return {
+    ...declaration,
+  };
+}
+
+function materializeIncludeRecords(parsedFiles: ParsedLedgerFile[]) {
+  return parsedFiles
+    .flatMap((parsedFile) =>
+      parsedFile.includeDirectives.map((directive) => ({
+        ...directive,
+        id: `${parsedFile.file.path}:${directive.line}:${directive.normalized || directive.raw}`,
+        matches: [...directive.matches],
+        path: parsedFile.file.path,
+      }) satisfies LedgerIncludeRecord),
+    )
+    .sort((left, right) => {
+      if (left.path === right.path) {
+        return left.line - right.line;
+      }
+
+      return left.path.localeCompare(right.path);
+    });
 }
 
 function copyLedgerAccountDirectiveRecord(
@@ -1051,8 +1189,8 @@ function verifyTransactionFragment(args: {
   const dependsOnPriorBalances = transaction.postings.some((posting) => posting.balanceAssertion);
   const diagnostics: LedgerDiagnostic[] = [];
   const prices: LedgerPrice[] = [];
-  const register: RegisterEntry[] = [];
-  const transactionPostings: RegisterEntry[] = [];
+  const postings: Posting[] = [];
+  const transactionPostings: Posting[] = [];
   const realTotals: CommodityTotals = new Map();
   const balancedVirtualTotals: CommodityTotals = new Map();
   const originalCommodityPrecisions = collectOriginalCommodityPrecisions(transaction.postings);
@@ -1123,7 +1261,7 @@ function verifyTransactionFragment(args: {
             commodity: assignment.commodity,
           },
           prices,
-          register,
+          postings,
           runtimeState,
           targetTotals: totalsForPostingKind(posting.kind, realTotals, balancedVirtualTotals),
           transaction,
@@ -1145,7 +1283,7 @@ function verifyTransactionFragment(args: {
       parsedFile,
       posting: posting as ParsedLedgerPosting & { amount: number; commodity: string },
       prices,
-      register,
+      postings,
       runtimeState,
       targetTotals: totalsForPostingKind(posting.kind, realTotals, balancedVirtualTotals),
       transaction,
@@ -1165,7 +1303,7 @@ function verifyTransactionFragment(args: {
     parsedFile,
     pending: pendingReal,
     prices,
-    register,
+    postings,
     runtimeState,
     targetTotals: realTotals,
     transaction,
@@ -1181,7 +1319,7 @@ function verifyTransactionFragment(args: {
     parsedFile,
     pending: pendingBalancedVirtual,
     prices,
-    register,
+    postings,
     runtimeState,
     targetTotals: balancedVirtualTotals,
     transaction,
@@ -1216,7 +1354,7 @@ function verifyTransactionFragment(args: {
     diagnostics,
     postingCount: transaction.postings.length,
     prices,
-    register,
+    postings,
     transaction:
       transactionPostings.length > 0
         ? {
@@ -1252,11 +1390,11 @@ function resolvePendingPostings(args: {
   parsedFile: ParsedLedgerFile;
   pending: PendingPosting[];
   prices: LedgerPrice[];
-  register: RegisterEntry[];
+  postings: Posting[];
   runtimeState: VerificationRuntimeState;
   targetTotals: CommodityTotals;
   transaction: ParsedLedgerTransaction;
-  transactionPostings: RegisterEntry[];
+  transactionPostings: Posting[];
   transactionId: string;
 }) {
   const {
@@ -1268,7 +1406,7 @@ function resolvePendingPostings(args: {
     parsedFile,
     pending,
     prices,
-    register,
+    postings,
     runtimeState,
     targetTotals,
     transaction,
@@ -1310,7 +1448,7 @@ function resolvePendingPostings(args: {
           commodity: inferredCommodity,
         },
         prices,
-        register,
+        postings,
         runtimeState,
         targetTotals,
         transaction,
@@ -1368,7 +1506,7 @@ function resolvePendingPostings(args: {
       commodity: inferredCommodity,
     },
     prices,
-    register,
+    postings,
     runtimeState,
     targetTotals,
     transaction,
@@ -1435,11 +1573,11 @@ function applyVerifiedPosting(args: {
   parsedFile: ParsedLedgerFile;
   posting: ParsedLedgerPosting & { amount: number; commodity: string };
   prices: LedgerPrice[];
-  register: RegisterEntry[];
+  postings: Posting[];
   runtimeState: VerificationRuntimeState;
   targetTotals: CommodityTotals | null;
   transaction: ParsedLedgerTransaction;
-  transactionPostings: RegisterEntry[];
+  transactionPostings: Posting[];
   transactionId: string;
   wasInferred: boolean;
 }) {
@@ -1449,7 +1587,7 @@ function applyVerifiedPosting(args: {
     parsedFile,
     posting,
     prices,
-    register,
+    postings,
     runtimeState,
     targetTotals,
     transaction,
@@ -1460,7 +1598,7 @@ function applyVerifiedPosting(args: {
   const accountMetadata = accountMetadataByName.get(posting.account);
   const effectiveTags = mergeLedgerTags(accountMetadata?.tags ?? [], transaction.tags, posting.tags);
   const postingId = `${parsedFile.file.path}:${transaction.headerLine}:${posting.line}`;
-  const registerPosting: RegisterEntry = {
+  const postingRecord: Posting = {
     account: posting.account,
     accountTags: accountMetadata?.tags ?? [],
     accountType: resolveEffectiveAccountType(posting.account, accountMetadata),
@@ -1492,8 +1630,8 @@ function applyVerifiedPosting(args: {
     transactionTags: transaction.tags,
   };
 
-  register.push(registerPosting);
-  transactionPostings.push(registerPosting);
+  postings.push(postingRecord);
+  transactionPostings.push(postingRecord);
   balanceDeltas.push({
     account: posting.account,
     amount: posting.amount,
@@ -2019,7 +2157,7 @@ function compareDependencyEdges(
   return left.from.localeCompare(right.from);
 }
 
-function compareRegisterEntries(left: RegisterEntry, right: RegisterEntry) {
+function comparePostings(left: Posting, right: Posting) {
   if (left.date === right.date) {
     return left.id.localeCompare(right.id);
   }
@@ -2170,7 +2308,7 @@ function buildSearchText(fields: string[]) {
 function buildAnalysisIndex(
   diagnostics: LedgerDiagnostic[],
   accountCatalog: LedgerAccountCatalogEntry[],
-  register: RegisterEntry[],
+  postings: Posting[],
   transactions: Transaction[],
 ): LedgerAnalysisIndex {
   const index: LedgerAnalysisIndex = {
@@ -2181,14 +2319,14 @@ function buildAnalysisIndex(
     accountCatalogPositionById: {},
     diagnosticPositionById: {},
     diagnosticsByPath: {},
-    registerIdsByAccount: {},
-    registerIdsByAccountType: {},
-    registerIdsByCommodity: {},
-    registerIdsByDate: {},
-    registerIdsByPath: {},
-    registerIdsByTag: {},
-    registerIdsByTagName: {},
-    registerPositionById: {},
+    postingIdsByAccount: {},
+    postingIdsByAccountType: {},
+    postingIdsByCommodity: {},
+    postingIdsByDate: {},
+    postingIdsByPath: {},
+    postingIdsByTag: {},
+    postingIdsByTagName: {},
+    postingPositionById: {},
     transactionIdsByDate: {},
     transactionIdsByPath: {},
     transactionPositionById: {},
@@ -2221,24 +2359,24 @@ function buildAnalysisIndex(
     }
   });
 
-  register.forEach((entry, position) => {
-    index.registerPositionById[entry.id] = position;
-    appendIndexId(index.registerIdsByAccount, entry.account, entry.id);
-    appendIndexId(index.registerIdsByAccountType, entry.accountType, entry.id);
-    appendIndexId(index.registerIdsByCommodity, entry.commodity, entry.id);
-    appendIndexId(index.registerIdsByDate, entry.date, entry.id);
-    appendIndexId(index.registerIdsByPath, entry.path, entry.id);
+  postings.forEach((entry, position) => {
+    index.postingPositionById[entry.id] = position;
+    appendIndexId(index.postingIdsByAccount, entry.account, entry.id);
+    appendIndexId(index.postingIdsByAccountType, entry.accountType, entry.id);
+    appendIndexId(index.postingIdsByCommodity, entry.commodity, entry.id);
+    appendIndexId(index.postingIdsByDate, entry.date, entry.id);
+    appendIndexId(index.postingIdsByPath, entry.path, entry.id);
     const seenTagNames = new Set<string>();
 
     for (const tag of entry.tags) {
-      appendIndexId(index.registerIdsByTag, buildLedgerTagKey(tag), entry.id);
+      appendIndexId(index.postingIdsByTag, buildLedgerTagKey(tag), entry.id);
 
       if (seenTagNames.has(tag.name)) {
         continue;
       }
 
       seenTagNames.add(tag.name);
-      appendIndexId(index.registerIdsByTagName, tag.name, entry.id);
+      appendIndexId(index.postingIdsByTagName, tag.name, entry.id);
     }
   });
 

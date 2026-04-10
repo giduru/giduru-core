@@ -6,6 +6,7 @@ import {
 } from './parser';
 import { verifyLedgerWorkspaceWithCache } from './verifier';
 import type {
+  AnalyzeLedgerDocumentsOptions,
   LedgerAnalysis,
   LedgerDocumentChange,
   LedgerEngineState,
@@ -254,10 +255,7 @@ export function analyzeLedgerState(
 
 export async function analyzeLedgerDocuments(
   documentsByPath: Map<string, LedgerSourceDocument>,
-  options: {
-    onProgress?: (progress: ParseLedgerProgress) => void;
-    verifyOptions?: VerifyLedgerOptions;
-  } & Pick<AnalyzeLedgerStateOptions, 'rootFilePaths'>,
+  options: AnalyzeLedgerDocumentsOptions,
 ): Promise<{
   analysis: LedgerAnalysis;
   state: LedgerEngineState;

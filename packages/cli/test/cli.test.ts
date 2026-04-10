@@ -32,12 +32,12 @@ test('cli analyze prints analysis JSON for a root ledger file', async () => {
   const { stdout } = await execFileAsync(process.execPath, [cliPath, 'analyze', rootFilePath]);
   const analysis = JSON.parse(stdout) as {
     diagnostics: unknown[];
-    register: Array<{ account: string }>;
+    postings: Array<{ account: string }>;
   };
 
   assert.deepEqual(analysis.diagnostics, []);
   assert.deepEqual(
-    analysis.register.map((entry) => entry.account),
+    analysis.postings.map((entry) => entry.account),
     ['Expenses:Food', 'Assets:Cash'],
   );
 });

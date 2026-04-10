@@ -14,6 +14,7 @@ import type {
   LedgerSourceDocument,
   LedgerTag,
   ParsedLedgerAccountDirective,
+  ParsedLedgerCommodityDirective,
   ParseLedgerProgress,
   ParsedLedgerBalanceAssertion,
   ParsedLedgerFile,
@@ -78,6 +79,7 @@ export function parseLedgerDocumentWithCache(
   const lineStarts = buildLineStarts(document.content);
   const {
     accountDirectives,
+    commodityDirectives,
     declaredAccounts,
     declaredCommodities,
     includeDirectives,
@@ -107,6 +109,7 @@ export function parseLedgerDocumentWithCache(
     cache: { tree },
     parsedFile: {
       accountDirectives,
+      commodityDirectives,
       declaredAccounts,
       declaredCommodities,
       directiveDiagnostics: buildDirectiveDiagnostics(
@@ -243,6 +246,7 @@ function extractParsedLedgerFileData(
 ) {
   const includeDirectives: ParsedLedgerIncludeDirective[] = [];
   const accountDirectives: ParsedLedgerAccountDirective[] = [];
+  const commodityDirectives: ParsedLedgerCommodityDirective[] = [];
   const declaredAccounts: string[] = [];
   const declaredCommodities: string[] = [];
   const prices: ParsedLedgerPrice[] = [];
@@ -252,6 +256,7 @@ function extractParsedLedgerFileData(
   if (!cursor.firstChild()) {
     return {
       accountDirectives,
+      commodityDirectives,
       declaredAccounts,
       declaredCommodities,
       includeDirectives,
@@ -282,18 +287,11 @@ function extractParsedLedgerFileData(
     }
 
     if (nodeName === 'CommodityDirective') {
-      if (cursor.firstChild()) {
-        do {
-          if ((cursor.type.name as string) === 'DirectiveArgument') {
-            const argument = text.slice(cursor.from, cursor.to).trim();
-            const commodity = extractDeclaredCommodity(argument);
+      const directive = extractCommodityDirective(cursor, text, lineStarts);
 
-            if (commodity) {
-              declaredCommodities.push(commodity);
-            }
-          }
-        } while (cursor.nextSibling());
-        cursor.parent();
+      if (directive) {
+        commodityDirectives.push(directive);
+        declaredCommodities.push(directive.commodity);
       }
 
       continue;
@@ -321,11 +319,49 @@ function extractParsedLedgerFileData(
   cursor.parent();
   return {
     accountDirectives,
+    commodityDirectives,
     declaredAccounts,
     declaredCommodities,
     includeDirectives,
     prices,
     transactions,
+  };
+}
+
+function extractCommodityDirective(
+  cursor: TreeCursor,
+  text: string,
+  lineStarts: number[],
+): ParsedLedgerCommodityDirective | null {
+  const line = lineNumberAt(cursor.from, lineStarts);
+
+  if (!cursor.firstChild()) {
+    return null;
+  }
+
+  let commodity = '';
+
+  do {
+    if ((cursor.type.name as string) !== 'DirectiveArgument') {
+      continue;
+    }
+
+    commodity = extractDeclaredCommodity(text.slice(cursor.from, cursor.to).trim()) ?? '';
+
+    if (commodity) {
+      break;
+    }
+  } while (cursor.nextSibling());
+
+  cursor.parent();
+
+  if (!commodity) {
+    return null;
+  }
+
+  return {
+    commodity,
+    line,
   };
 }
 

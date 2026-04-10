@@ -1,5 +1,5 @@
 {
-  "name": "giduru-core",
+  "name": "@giduru/core",
   "version": "0.1.1",
   "description": "Pure hledger parsing and verification engine extracted from Giduru.",
   "keywords": [
@@ -27,7 +27,15 @@
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
-      "require": "./dist/src/index.js"
+      "import": "./dist/src/index.js",
+      "require": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    },
+    "./engine": {
+      "types": "./dist/src/engine.d.ts",
+      "import": "./dist/src/engine.js",
+      "require": "./dist/src/engine.js",
+      "default": "./dist/src/engine.js"
     }
   },
   "files": [
@@ -52,6 +60,6 @@
   },
   "dependencies": {
     "@lezer/common": "^1.5.1",
-    "codemirror-lang-hledger": "^0.5.0"
+    "@giduru/codemirror-lang-hledger": "^0.5.0"
   }
 }
