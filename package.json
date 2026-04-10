@@ -2,7 +2,7 @@
   "name": "giduru-workspace",
   "private": true,
   "version": "0.1.0",
-  "description": "Workspace for the giduru-core and giduru-cli npm packages.",
+  "description": "Workspace for the @giduru/core and giduru-cli npm packages.",
   "workspaces": [
     "packages/*"
   ],
@@ -10,12 +10,12 @@
     "node": ">=18"
   },
   "scripts": {
-    "bench": "npm run bench --workspace giduru-core --",
-    "build": "npm run build --workspace giduru-core && npm run build --workspace giduru-cli",
-    "pack:dry-run": "npm run pack:dry-run --workspace giduru-core && npm run pack:dry-run --workspace giduru-cli",
-    "publish:check": "npm run publish:check --workspace giduru-core && npm run publish:check --workspace giduru-cli",
-    "test": "npm run test --workspace giduru-core && npm run test --workspace giduru-cli",
-    "typecheck": "npm run typecheck --workspace giduru-core && npm run typecheck --workspace giduru-cli"
+    "bench": "npm run bench --workspace @giduru/core --",
+    "build": "npm run build --workspace @giduru/core && npm run build --workspace giduru-cli",
+    "pack:dry-run": "npm run pack:dry-run --workspace @giduru/core && npm run pack:dry-run --workspace giduru-cli",
+    "publish:check": "npm run publish:check --workspace @giduru/core && npm run publish:check --workspace giduru-cli",
+    "test": "npm run test --workspace @giduru/core && npm run test --workspace giduru-cli",
+    "typecheck": "npm run typecheck --workspace @giduru/core && npm run typecheck --workspace giduru-cli"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

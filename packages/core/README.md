@@ -1,4 +1,4 @@
-# `giduru-core`
+# `@giduru/core`
 
 Pure parsing and verification engine extracted from Giduru's app runtime.
 
@@ -8,7 +8,7 @@ Artifact inventory and query-layer notes live in [ARTIFACTS.md](./ARTIFACTS.md).
 ## Install
 
 ```sh
-npm install giduru-core
+npm install @giduru/core
 ```
 
 This package is maintained from the [`giduru/giduru-core`](https://github.com/giduru/giduru-core) repository.
@@ -21,16 +21,40 @@ This package is maintained from the [`giduru/giduru-core`](https://github.com/gi
 - Emit analysis output that is already indexed for fast higher-level querying.
 - Stay compatible with the hledger model where it matters, without inheriting directive-order dependence.
 
-## Public Shape
+## Public API
 
-- `createLedgerEngineState()`
-- `applyLedgerDocumentChanges(state, changes)`
-- `buildParsedLedgerWorkspace(state, { rootFilePaths })`
-- `analyzeLedgerState(state, verifyOptions)`
 - `analyzeLedgerDocuments(documentsByPath, options)`
-- `parseLedgerDocument()`
-- `parseLedgerWorkspace()`
-- `verifyLedgerWorkspace()`
+- `filterPostings(analysis, filter)`
+- `filterPostingIds(analysis, filter)`
+- `getPostingIdsForTag(index, tag)`
+- `resolveLedgerPrice(queryable, query)`
+- `resolveLedgerPriceOnDate(queryable, query)`
+- `resolveLatestLedgerPrice(queryable, query)`
+- stable bookkeeping types such as `LedgerAnalysis`, `Posting`, `Transaction`, `LedgerPrice`, `LedgerCommodityCatalogEntry`, and `LedgerIncludeRecord`
+
+These stable exports live at the package root:
+
+```ts
+import { analyzeLedgerDocuments, filterPostings, resolveLatestLedgerPrice } from '@giduru/core';
+```
+
+## Engine API
+
+The broader parser/incremental engine surface is still available from:
+
+```ts
+import {
+  analyzeLedgerState,
+  applyLedgerDocumentChanges,
+  buildParsedLedgerWorkspace,
+  createLedgerEngineState,
+  parseLedgerDocument,
+  parseLedgerWorkspace,
+  verifyLedgerWorkspace,
+} from '@giduru/core/engine';
+```
+
+Use the `engine` subpath when you need parser IR, incremental state handles, or lower-level verification entry points. The package root is the semver-stable API boundary.
 
 Documents are pure values:
 
@@ -78,6 +102,17 @@ This is a deliberate deviation from order-sensitive reader behavior upstream.
 - posting kinds: real, virtual, balanced virtual
 - balance assertions and simple balance assignments
 - separate balancing for real vs balanced-virtual posting groups
+
+## Stable Analysis Output
+
+The stable `LedgerAnalysis` artifact includes:
+
+- `postings`: flat posting-level verified output
+- `transactions`: transaction-level output with embedded postings
+- `prices`: directive plus posting-derived prices
+- `commodities`: commodity catalog with declaration and usage metadata
+- `includes`: promoted include directive metadata
+- `accountCatalog`, `balances`, `diagnostics`, `graph`, `index`, `summary`, and `timings`
 
 ## Known Gaps
 

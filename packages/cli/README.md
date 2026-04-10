@@ -1,6 +1,6 @@
 # `giduru-cli`
 
-Thin command-line interface for [`giduru-core`](https://www.npmjs.com/package/giduru-core).
+Thin command-line interface for [`@giduru/core`](https://www.npmjs.com/package/@giduru/core).
 
 ## Install
 

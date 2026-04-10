@@ -2,7 +2,7 @@
 
 This repository is a standard npm workspaces monorepo with two independently publishable packages:
 
-- [`giduru-core`](./packages/core/README.md): the pure parsing and verification engine
+- [`@giduru/core`](./packages/core/README.md): the pure parsing and verification engine
 - [`giduru-cli`](./packages/cli/README.md): a thin filesystem-backed CLI around the core
 
 ## Layout

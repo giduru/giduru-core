@@ -7,7 +7,7 @@ import type {
   LedgerAnalysis,
   LedgerDiagnostic,
   LedgerSourceDocument,
-} from 'giduru-core';
+} from '@giduru/core';
 
 const { version } = require('../../package.json') as { version: string };
 
@@ -172,7 +172,7 @@ async function analyzeRootFile(rootFilePath: string): Promise<LedgerAnalysis> {
   }
 
   const documents = await loadLedgerDocuments(absoluteRootPath);
-  const { analyzeLedgerDocuments } = await import('giduru-core');
+  const { analyzeLedgerDocuments } = await import('@giduru/core');
   const { analysis } = await analyzeLedgerDocuments(documents, {
     rootFilePaths: [absoluteRootPath],
     verifyOptions: {
