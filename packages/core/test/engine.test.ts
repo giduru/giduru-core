@@ -252,7 +252,7 @@ P 2024-01-01 USD 1.30 CAD
   );
 });
 
-test('conflicts between P directives and @ annotations are reported as diagnostics', async () => {
+test('P directives win over same-day posting-derived prices and do not conflict', async () => {
   const documents = new Map([
     [
       'main.journal',
@@ -260,7 +260,7 @@ test('conflicts between P directives and @ annotations are reported as diagnosti
         content: `P 2024-01-01 VEQT 35 CAD
 
 2024-01-01 Buy
-  Assets:Brokerage  1 VEQT @ CAD 36
+  Assets:Brokerage  1 VEQT @@ CAD 36
   Assets:Cash  CAD -36
 `,
         isLedger: true,
@@ -281,21 +281,27 @@ test('conflicts between P directives and @ annotations are reported as diagnosti
   const diagnostics = analysis.diagnostics.filter((diagnostic) =>
     diagnostic.message.includes('Conflicting prices for VEQT -> CAD on 2024-01-01'),
   );
-
-  assert.equal(diagnostics.length, 2);
-  assert.deepEqual(
-    diagnostics.map((diagnostic) => diagnostic.line),
-    [1, 4],
+  const sameDayPrices = analysis.prices.filter(
+    (price) =>
+      price.date === '2024-01-01' &&
+      price.fromCommodity === 'VEQT' &&
+      price.toCommodity === 'CAD',
   );
+
+  assert.equal(diagnostics.length, 0);
+  assert.equal(sameDayPrices.length, 2);
+  assert.equal(sameDayPrices.at(-1)?.source, 'directive');
+  assert.equal(sameDayPrices.at(-1)?.amount, 35);
+  assert.equal(sameDayPrices.at(-1)?.line, 1);
 });
 
-test('conflicts between @ and @@ annotations are reported as diagnostics', async () => {
+test('same-day @@ posting-derived prices do not conflict and later prices win', async () => {
   const documents = new Map([
     [
       'main.journal',
       {
         content: `2024-01-01 Buy
-  Assets:Brokerage  2 VEQT @ CAD 10
+  Assets:Brokerage  2 VEQT @@ CAD 20
   Assets:Cash  CAD -20
 
 2024-01-01 Buy more
@@ -320,12 +326,18 @@ test('conflicts between @ and @@ annotations are reported as diagnostics', async
   const diagnostics = analysis.diagnostics.filter((diagnostic) =>
     diagnostic.message.includes('Conflicting prices for VEQT -> CAD on 2024-01-01'),
   );
-
-  assert.equal(diagnostics.length, 2);
-  assert.deepEqual(
-    diagnostics.map((diagnostic) => diagnostic.line),
-    [2, 6],
+  const sameDayPrices = analysis.prices.filter(
+    (price) =>
+      price.date === '2024-01-01' &&
+      price.fromCommodity === 'VEQT' &&
+      price.toCommodity === 'CAD',
   );
+
+  assert.equal(diagnostics.length, 0);
+  assert.equal(sameDayPrices.length, 2);
+  assert.equal(sameDayPrices.at(-1)?.source, 'posting-annotation');
+  assert.equal(sameDayPrices.at(-1)?.amount, 12);
+  assert.equal(sameDayPrices.at(-1)?.line, 6);
 });
 
 test('simple balance assignments are inferred from assertions', async () => {
