@@ -1,50 +1,40 @@
-# Ledger Engine Architecture
+# `@giduru/core` Architecture
 
-This package is the isolated parse/analyze/verify core extracted from Giduru.
+This package is the portable double-entry bookkeeping core for Giduru.
 
-It is intended to stay:
+The design target is simple:
 
-- filesystem-agnostic
-- UI-agnostic
-- runtime-agnostic
-- packageable as a future standalone npm module
+- one package
+- semver-stable root API
+- broader unstable engine surface behind `@giduru/core/engine`
+- no filesystem or runtime coupling in the core
 
-The app should treat it like a local backend library.
+## Package Boundary
 
-## Purpose
+The package root is the public contract.
 
-The engine accepts plain document snapshots or explicit per-file changes and produces:
+- `@giduru/core`
+  - bookkeeping-first types such as `LedgerAnalysis`, `Posting`, `Transaction`, `LedgerPrice`, `LedgerCommodityCatalogEntry`, and `LedgerIncludeRecord`
+  - pure analysis helpers such as `analyzeLedgerDocuments()`
+  - stable filtering and price-resolution helpers
+- `@giduru/core/engine`
+  - parser IR
+  - incremental engine state
+  - workspace objects
+  - lower-level parse and verify entry points
 
-- parsed workspace state
-- semantic diagnostics
-- posting-level register output
-- transaction-level output
-- account balances
-- derived prices
-- include/dependency graph data
-- indexed output for fast higher-level querying
+The rule is:
 
-The long-term design goal is to support:
+- if an API is intended to survive a future engine rewrite, it belongs at the package root
+- if an API exposes parser structure, cache state, or replay machinery, it belongs under `engine`
 
-- incremental reparse
-- incremental verification
-- future query layers such as RSQL over analysis output
-- reuse in other tools without pulling in Expo, React, Zustand, or browser file APIs
+## Portability Contract
 
-## Public Surface
+The core package is runtime-agnostic and storage-agnostic.
 
-The current public shape is centered on these functions:
+It does not read files, talk to S3, use browser APIs, or depend on React Native or Node-specific runtime state.
 
-- `createLedgerEngineState(documents?)`
-- `applyLedgerDocumentChanges(state, changes, options?)`
-- `buildParsedLedgerWorkspace(state, { rootFilePaths })`
-- `analyzeLedgerState(state, verifyOptions)`
-- `analyzeLedgerDocuments(documentsByPath, options)`
-- `parseLedgerDocument()`
-- `parseLedgerWorkspace()`
-- `verifyLedgerWorkspace()`
-
-Core data enters as `LedgerSourceDocument` values:
+Hosts are responsible for turning their storage model into document snapshots:
 
 ```ts
 type LedgerSourceDocument = {
@@ -56,333 +46,137 @@ type LedgerSourceDocument = {
 };
 ```
 
-This keeps the package pure and host-independent.
+That keeps the same package usable from:
 
-## Pipeline
+- the CLI
+- React Native
+- a PWA
+- Lambda or ECS
+- a future local or cloud sync layer
 
-The current pipeline is:
+## Stable Root API
 
-1. The host creates or updates a `LedgerEngineState`.
-2. `applyLedgerDocumentChanges()` reparses only changed ledger files.
-3. `buildParsedLedgerWorkspace()` resolves root files and reachable include graph.
-4. `verifyLedgerWorkspaceWithCache()` builds a verification plan for the reachable workspace.
-5. The verifier reuses cached transaction fragments where safe and replays only what changed.
-6. Final materialization produces balances, register, transactions, prices, diagnostics, graph, and indexes.
+The stable root entry point is:
 
-There are two distinct layers of incrementality:
+- `analyzeLedgerDocuments(documents, options?) => Promise<LedgerAnalysis>`
 
-- parse incrementality
-- verify incrementality
+This API is intentionally narrow:
 
-Both matter. The parser is no longer the main bottleneck on realistic incremental edits.
+- input is a snapshot of documents
+- output is a stable analysis artifact
+- parser workspace and engine state are not exposed at the root
 
-## Parser Layer
+That makes the root API appropriate for semver versioning and future implementation swaps.
 
-The parser in [src/parser.ts](./src/parser.ts) uses the `codemirror-lang-hledger` Lezer grammar and extracts:
+## Engine API
 
-- include directives
-- account directives
-- commodity directives
-- price directives
-- transactions
-- postings
-- posting annotations
-- balance assertions
-- comment-derived tags
+The `engine` subpath exposes the broader implementation surface:
 
-Important current parser behavior:
+- `createLedgerEngineState()`
+- `applyLedgerDocumentChanges()`
+- `buildParsedLedgerWorkspace()`
+- `analyzeLedgerState()`
+- `analyzeLedgerDocuments()`
+- `parseLedgerDocument()`
+- `parseLedgerWorkspace()`
+- `verifyLedgerWorkspace()`
 
-- parse-tree reuse is supported for changed files
-- quoted commodities are preserved correctly
-- total-price `@@` annotations are normalized to the posting sign for balancing
-- transaction cache keys are built at parse time and carried forward into verification planning
+This is the right surface for:
 
-The parser is responsible for syntax and extraction, not semantic accounting rules.
+- editor integrations
+- incremental re-analysis
+- benchmark harnesses
+- internal tooling
+- future compatibility shims during engine rewrites
 
-## Verifier Layer
+It is not the surface to treat as the long-term external contract.
 
-The verifier in [src/verifier.ts](./src/verifier.ts) does semantic accounting work:
+## Canonical Data Model
 
-- declaration enforcement
-- transaction balancing
-- missing amount inference
-- balance assertions and simple assignments
-- priced posting balancing
-- balanced-virtual balancing
-- include cycle and reachability diagnostics
+The bookkeeping model is transaction-first and posting-first.
 
-Important semantic choice:
+The package should use:
 
-- declaration directives are intentionally order-insensitive
+- `transactions` for transaction-level verified units
+- `postings` for posting-level verified units
 
-That means `account` and `commodity` declarations are collected across the reachable workspace before strict validation runs. This avoids "declare before use" behavior and is an explicit engine design decision.
+It should not use `register` as a primary public or internal artifact name.
 
-## Incremental Techniques
+The stable `LedgerAnalysis` output includes:
 
-The engine currently uses several layered caches.
-
-### Parse Caches
-
-Stored in [src/workspace.ts](./src/workspace.ts):
-
-- previous parsed files by path
-- previous parse trees by path
-- state-local analysis cache for identical state and options
-
-`applyLedgerDocumentChanges()` reparses only:
-
-- files whose content or metadata changed
-- files with glob includes when the known path set changes
-
-Everything else stays cached.
-
-### Verification Fragments
-
-The verifier works on per-transaction fragments:
-
-- diagnostics
-- register entries
-- derived prices
-- balance deltas
-- touched accounts
-- touched commodities
-- dependency on prior balances
-
-These fragments are cached in `LedgerVerificationCache`.
-
-### Prefix Reuse
-
-If the ordered transaction stream is unchanged at the front, the verifier reuses the verified prefix directly.
-
-### Balance-Independent Suffix Reuse
-
-Fragments that do not depend on prior running balances can be reused even after an earlier edit, as long as:
-
-- the transaction cache key still matches
-- declaration status for symbols touched by the fragment is still equivalent
-
-This is what makes early edits much cheaper than a full reverification.
-
-### Declaration-Aware Reuse
-
-Declaration edits no longer invalidate everything blindly.
-
-A fragment is reusable across declaration changes when the declaration status of the accounts and commodities it touches has not changed from:
-
-- declared to undeclared
-- undeclared to declared
-
-This is stricter than full blind reuse, but much cheaper than total invalidation.
-
-### Checkpoints
-
-The verifier stores running-balance checkpoints every 128 transactions.
-
-These checkpoints allow restore-and-replay from the nearest safe point instead of replaying from the beginning on every run.
-
-### Checkpoint Replay Blocks
-
-Added in commit `b7dc3e6`.
-
-If a checkpoint-aligned block consists entirely of balance-independent reusable fragments, the engine stores the aggregated balance delta for that whole block and can bulk-apply it on later runs.
-
-This helps the "early edit followed by a long reusable suffix" case.
-
-## Output Shape
-
-The final `LedgerAnalysis` includes:
-
-- `accounts`
+- `postings`
+- `transactions`
+- `prices`
+- `commodities`
+- `includes`
+- `accountCatalog`
 - `balances`
-- `declaredAccounts`
-- `declaredCommodities`
 - `diagnostics`
 - `graph`
 - `index`
-- `parserSummary`
-- `prices`
-- `register`
 - `summary`
 - `timings`
-- `transactions`
 
-### Register Output
+These artifacts are the foundation for future query, REST, and RSQL layers.
 
-`register` is posting-level verified output.
+## Price Semantics
 
-Each entry includes:
+Price resolution is first-class in the stable surface.
 
-- account
-- account type
-- amount and commodity
-- balance assertion metadata
-- inferred amount flag
-- posting kind
-- path, line, date
-- transaction linkage
-- search text
-- tags
+Current rules:
 
-### Transaction Output
+- same-day conflicts are reported only between `P` directives
+- posting-derived `@@` or `@` prices do not conflict with same-day `P` directives
+- when resolving prices, a `P` directive wins if present for that day
+- otherwise the later posting-derived price in parse order wins for stability
 
-`transactions` is transaction-level output with verified postings embedded.
+This keeps balancing behavior compatible with ledger workflows while making price lookup deterministic.
 
-### Prices
+## Internal Pipeline
 
-`prices` contains both:
+The engine still has layered phases:
 
-- directive prices
-- posting-annotation-derived prices
+1. parse individual ledger files
+2. resolve reachable includes
+3. collect declaration metadata
+4. verify transactions and postings
+5. materialize stable analysis artifacts
+6. build query-oriented indexes
 
-### Graph
+The parser extracts syntax and directive structure.
 
-`graph` contains:
+The verifier owns semantic accounting behavior:
 
-- dependency edges
-- included files
-- root files
-
-### Timings
-
-`timings` currently includes:
-
-- `parseMs`
-- `verifyMs`
-- `totalMs`
-
-Important caveat:
-
-- `verifyMs` measures verifier planning/replay work, but not all final materialization wall time
-
-When benchmarking, prefer wall-clock benchmark output over `verifyMs` alone.
-
-## Indexes and Query Readiness
-
-The package already emits structured indexes in `analysis.index`.
-
-Current indexed dimensions include:
-
-- diagnostics by path
-- diagnostic position by id
-- register ids by account
-- register ids by account type
-- register ids by commodity
-- register ids by date
-- register ids by path
-- register position by id
-- transaction ids by date
-- transaction ids by path
-- transaction position by id
-
-This is the intended base for a future query layer such as RSQL. The engine already emits stable ids and pre-grouped buckets instead of forcing all future consumers to rescan arrays.
-
-## hledger Compatibility Notes
-
-Current coverage includes:
-
-- include directives, including globs
-- unmatched-glob diagnostics
-- declared account and commodity strictness
+- declaration enforcement
 - missing amount inference
-- priced posting balancing for `@` and `@@`
-- total-price sign normalization
-- balance assertions and simple assignments
-- balanced virtual posting balancing
+- balancing
+- balance assertions
+- priced-posting balancing
+- include diagnostics
+- artifact materialization
 
-Known gaps:
+## Incremental Strategy
 
-- full mixed-commodity balance assignment semantics
-- automatic commodity conversion during balancing
-- lot semantics beyond parse capture
-- posting-date-aware balancing order
-- alias/apply-account and other imperative directive semantics
+Incrementality remains an internal engine concern rather than part of the stable root contract.
 
-These gaps are isolated to the engine package now rather than being mixed into app services.
+Important current techniques:
 
-## Benchmark Harness
+- parse-tree reuse per file
+- cached parsed files by path
+- per-transaction verification fragments
+- replay checkpoints
+- reuse of balance-independent suffixes
 
-The benchmark harness lives in [bench/run.js](./bench/run.js).
+This is why the engine surface stays separated from the root API.
 
-Useful commands:
+The implementation can evolve aggressively without forcing churn in the stable contract.
 
-```sh
-npm run bench -- --preset medium
-npm run bench -- --preset large --filter incremental
-npm run bench -- --preset enterprise
-npm run bench -- --preset large --json
-```
+## Repository Plan
 
-Supported presets:
+The repo-level direction is:
 
-- `small`
-- `medium`
-- `large`
-- `enterprise`
-
-Supported scenario types include:
-
-- large single-file journals
-- priced journals
-- include-heavy workspaces
-- glob-included workspaces
-- leaf edits
-- early edits
-- declaration edits
-- glob adds
-- glob deletes
-- noop cached analyses
-
-The `enterprise` preset is for capacity planning, not quick smoke tests.
-
-## Current Performance Shape
-
-The main bottleneck is no longer raw parsing.
-
-The current shape is:
-
-- no-op analysis is essentially solved through exact state+options caching
-- incremental parsing is working well
-- verifier replay is much better than the original full-workspace rerun model
-- remaining wall time is mostly in changed-state materialization/index work and unavoidable replay in the harder cases
-
-Rough large-preset incremental behavior at the current accepted baseline:
-
-- leaf edit: about `220-260ms` wall
-- early edit: about `250ms` wall
-- glob add: about `190-225ms` wall
-- declaration edit: about `230-300ms` wall
-- glob delete: about `240-285ms` wall
-- noop analysis: sub-millisecond
-
-Treat those as rough benchmark-shape numbers, not hard guarantees.
-
-## Accepted vs Rejected Optimizations
-
-Accepted:
-
-- extracted package boundary
-- incremental parse state
-- analysis result caching
-- verification fragments
-- declaration-aware fragment reuse
-- checkpoints
-- checkpoint replay blocks
-
-Tried and rejected because benchmarks regressed:
-
-- aggressive parser cache-key rewrite to replace `JSON.stringify`
-- merged materialization/index construction pass
-- loop-heavy rewrites of several array-heavy materialization paths
-
-Future work should assume that simple "fewer array helpers must be faster" rewrites are not automatically wins in this codebase. Benchmark before keeping them.
-
-## Good Next Targets
-
-If future work continues on performance, the best remaining targets are:
-
-- partial materialization reuse for changed states
-- partial index reuse instead of rebuilding all buckets every run
-- better measurement separation between replay time and materialization time
-- more selective invalidation for declaration and include-graph changes
-
-If the package ever needs a bigger step-function improvement beyond this, it will probably require a larger architectural change than routine micro-optimization.
+1. Keep `@giduru/core` as the canonical data and analysis package.
+2. Keep `giduru-cli` as a thin filesystem adapter over the core.
+3. Add higher-level query or server layers above the core when needed, without pushing transport concerns into the core package.
+4. Preserve the root package API across refactors using semver, while allowing `@giduru/core/engine` to change faster.
+5. Keep the package ready for a future Rust or WASM implementation by holding the root API steady and isolating engine details.

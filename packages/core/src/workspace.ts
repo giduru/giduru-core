@@ -255,7 +255,7 @@ export function analyzeLedgerState(
 
 export async function analyzeLedgerDocuments(
   documentsByPath: Map<string, LedgerSourceDocument>,
-  options: AnalyzeLedgerDocumentsOptions,
+  options: AnalyzeLedgerDocumentsOptions = {},
 ): Promise<{
   analysis: LedgerAnalysis;
   state: LedgerEngineState;
@@ -281,7 +281,10 @@ export async function analyzeLedgerDocuments(
   };
   const { analysis, cache } = verifyLedgerWorkspaceWithCache(
     parsedWorkspace,
-    options.verifyOptions,
+    {
+      availableFilePaths: Array.from(documentsByPath.keys()),
+      rootFilePaths: options.rootFilePaths,
+    },
     null,
   );
   state.verificationCache = cache;
@@ -291,8 +294,8 @@ export async function analyzeLedgerDocuments(
     new Map([
       [
         createAnalysisCacheKey({
-          availableFilePaths: options.verifyOptions?.availableFilePaths,
-          rootFilePaths: options.verifyOptions?.rootFilePaths ?? options.rootFilePaths,
+          availableFilePaths: Array.from(documentsByPath.keys()),
+          rootFilePaths: options.rootFilePaths,
         }),
         { analysis, workspace: parsedWorkspace },
       ],

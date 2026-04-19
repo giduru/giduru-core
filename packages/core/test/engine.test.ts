@@ -10,9 +10,37 @@ import {
 } from '../src';
 import {
   analyzeLedgerState,
+  analyzeLedgerDocuments as analyzeLedgerDocumentsWithState,
   applyLedgerDocumentChanges,
   createLedgerEngineState,
 } from '../src/engine';
+
+test('root analysis API stays narrow while engine analysis exposes workspace and state', async () => {
+  const document = {
+    content: `2024-01-01 Opening
+  Assets:Cash  $10.00
+  Equity:OpeningBalances  $-10.00
+`,
+    isLedger: true,
+    name: 'main.journal',
+    path: 'main.journal',
+  };
+
+  const analysis = await analyzeLedgerDocuments([document], {
+    rootFilePaths: ['main.journal'],
+  });
+  const engineResult = await analyzeLedgerDocumentsWithState(
+    new Map([[document.path, document]]),
+    {
+      rootFilePaths: ['main.journal'],
+    },
+  );
+
+  assert.equal(analysis.postings.length, 2);
+  assert.equal(engineResult.analysis.postings.length, 2);
+  assert.equal(engineResult.workspace.rootFilePaths[0], 'main.journal');
+  assert.ok(engineResult.state.documentsByPath.has('main.journal'));
+});
 
 test('declaration directives are order-insensitive', async () => {
   const documents = new Map([
@@ -34,12 +62,8 @@ commodity $1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -65,12 +89,8 @@ test('missing amounts are inferred inside the real-posting balance group', async
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const inferred = analysis.postings.find((entry) => entry.account === 'Assets:Cash');
@@ -95,12 +115,8 @@ test('missing amounts can infer zero when balancing against a single zero commod
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const inferred = analysis.postings.find((entry) => entry.account === 'equity:opening-balances');
@@ -136,12 +152,8 @@ test('priced postings balance against their cost commodity totals', async () => 
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -174,12 +186,8 @@ test('total price annotations are used for balancing', async () => {
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -206,12 +214,8 @@ test('total price annotations inherit the posting sign for balancing', async () 
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -237,12 +241,8 @@ P 2024-01-01 USD 1.30 CAD
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const diagnostics = analysis.diagnostics.filter((diagnostic) =>
@@ -274,12 +274,8 @@ test('P directives win over same-day posting-derived prices and do not conflict'
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const diagnostics = analysis.diagnostics.filter((diagnostic) =>
@@ -319,12 +315,8 @@ test('same-day @@ posting-derived prices do not conflict and later prices win', 
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const diagnostics = analysis.diagnostics.filter((diagnostic) =>
@@ -380,19 +372,11 @@ test('price resolution prefers P directives, otherwise later posting-derived pri
     ],
   ]);
 
-  const { analysis: directiveAnalysis } = await analyzeLedgerDocuments(directiveDocuments, {
+  const directiveAnalysis = await analyzeLedgerDocuments(directiveDocuments, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
-  const { analysis: postingAnalysis } = await analyzeLedgerDocuments(postingDocuments, {
+  const postingAnalysis = await analyzeLedgerDocuments(postingDocuments, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const directivePrice = resolveLedgerPriceOnDate(directiveAnalysis, {
@@ -431,12 +415,8 @@ test('simple balance assignments are inferred from assertions', async () => {
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(analysis.postings.length, 1);
@@ -459,12 +439,8 @@ test('failed balance assertions surface as diagnostics', async () => {
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -493,12 +469,8 @@ test('unmatched include globs become parser diagnostics', async () => {
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -538,12 +510,8 @@ commodity USD
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal', 'nested/other.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.deepEqual(analysis.includes.map((record) => record.path), ['main.journal']);
@@ -583,12 +551,8 @@ test('undeclared accounts are reported even when validation is order-insensitive
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -617,12 +581,8 @@ test('undeclared commodities are reported from commodity directives', async () =
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -652,12 +612,8 @@ commodity "HSUV.U"
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(analysis.declaredCommodities.includes('"HSUV.U"'), true);
@@ -687,12 +643,8 @@ test('balanced virtual postings must balance among themselves', async () => {
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -719,12 +671,8 @@ test('search indexes are populated for postings and transaction outputs', async 
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const cashIds = analysis.index.postingIdsByAccount['Assets:Cash'] ?? [];
@@ -760,12 +708,8 @@ commodity USD 1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   assert.equal(
@@ -803,12 +747,8 @@ commodity USD 1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const entry = analysis.accountCatalog.find((account) => account.account === 'Expenses:Food');
@@ -879,12 +819,8 @@ commodity USD 1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['a.journal', 'b.journal', 'main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const entry = analysis.accountCatalog.find((account) => account.account === 'Expenses:Food');
@@ -934,12 +870,8 @@ commodity USD 1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const entry = analysis.accountCatalog.find((account) => account.account === 'CashPool');
@@ -949,7 +881,7 @@ commodity USD 1.00
   assert.equal(entry.effectiveType, 'unknown');
   assert.deepEqual(entry.typeAnnotationValues, ['A', 'X']);
   assert.equal(
-    analysis.postings.find((registerEntry) => registerEntry.account === 'CashPool')?.accountType,
+    analysis.postings.find((postingEntry) => postingEntry.account === 'CashPool')?.accountType,
     'unknown',
   );
   assert.equal(
@@ -977,12 +909,8 @@ account Assets:Cash ; type:X
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const entry = analysis.accountCatalog.find((account) => account.account === 'Assets:Cash');
@@ -1016,12 +944,8 @@ test('declared-only accounts are included in the account catalog', async () => {
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const entry = analysis.accountCatalog.find((account) => account.account === 'Assets:Savings');
@@ -1052,12 +976,8 @@ commodity USD 1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const entry = analysis.accountCatalog.find((account) => account.account === 'Expenses:Food');
@@ -1099,12 +1019,8 @@ commodity USD 1.00
     ],
   ]);
 
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: ['main.journal'],
-    verifyOptions: {
-      availableFilePaths: ['main.journal'],
-      rootFilePaths: ['main.journal'],
-    },
   });
 
   const grossEntry = analysis.postings.find((entry) => entry.account === 'Payroll:Gross');

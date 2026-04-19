@@ -173,12 +173,8 @@ async function analyzeRootFile(rootFilePath: string): Promise<LedgerAnalysis> {
 
   const documents = await loadLedgerDocuments(absoluteRootPath);
   const { analyzeLedgerDocuments } = await import('@giduru/core');
-  const { analysis } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: [absoluteRootPath],
-    verifyOptions: {
-      availableFilePaths: Array.from(documents.keys()),
-      rootFilePaths: [absoluteRootPath],
-    },
   });
 
   return analysis;

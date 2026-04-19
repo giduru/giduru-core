@@ -8,7 +8,7 @@ The public entry points produce three layers of output:
 
 | API | Output | Purpose |
 | --- | --- | --- |
-| `analyzeLedgerDocuments()` | `{ analysis, workspace, state }` | Stable root entry point for full analysis plus parser output and incremental cache state. |
+| `analyzeLedgerDocuments()` | `LedgerAnalysis` | Stable root entry point for pure snapshot analysis. |
 | `parseLedgerDocument()` | `ParsedLedgerFile` | Single-file parser output from `@giduru/core/engine`. |
 | `parseLedgerWorkspace()` | `ParsedLedgerWorkspace` | Reachable parser output for a workspace from `@giduru/core/engine`. |
 | `verifyLedgerWorkspace()` | `LedgerAnalysis` | Semantic, verified analysis output from `@giduru/core/engine`. |
@@ -19,6 +19,7 @@ The important distinction is:
 - `LedgerAnalysis` is the stable, query-ready artifact.
 - `ParsedLedgerWorkspace` is still useful when you need raw parser details that are not promoted into `LedgerAnalysis`.
 - `LedgerEngineState` is an incremental cache handle, not a stable external artifact or API contract.
+- parser workspace and engine state are intentionally not part of the root package contract.
 
 ## Top-Level `LedgerAnalysis` Fields
 
@@ -187,23 +188,15 @@ So the query layer can support tag predicates without rescanning the full postin
 
 ## Package Boundary Recommendation
 
-I would not put the HTTP server or OpenAPI generator in `@giduru/core`.
+Keep `@giduru/core` focused on canonical analysis artifacts and bookkeeping semantics.
 
-I would also avoid putting the RSQL syntax parser in `@giduru/core`. That pushes the package beyond "parser and verifier" into "query language host", which is a different concern.
+Keep transport, query parsing, HTTP, and storage adapters above the core.
 
-The clean split is:
+That does not require a new package immediately. It only requires discipline:
 
-- `@giduru/core`
-  - owns parsing, verification, incremental state, and canonical analysis types
-  - may optionally own a small data-only artifact or field manifest if you want one source of truth for collection definitions
-- `giduru-query` (new package)
-  - depends on `@giduru/core`
-  - owns collection descriptors, field metadata, RSQL parsing, query compilation, query execution, and OpenAPI generation
-- `giduru-cli`
-  - stays as the filesystem and runtime adapter
-  - can add `serve` mode on top of `giduru-query`
-
-This keeps `core` focused while still making the query engine reusable as a package.
+- stable semver contract at `@giduru/core`
+- broader unstable implementation surface at `@giduru/core/engine`
+- CLI, server, or sync adapters layered above the core
 
 ## OpenAPI Recommendation
 
@@ -216,7 +209,7 @@ Do not try to generate `openapi.json` directly from TypeScript types alone. The 
 - sort keys
 - query examples
 
-Instead, define runtime collection descriptors in the query package. A descriptor should include:
+Instead, define runtime collection descriptors in the layer that owns query and transport behavior. A descriptor should include:
 
 - collection name
 - backing artifact
@@ -232,18 +225,18 @@ From that descriptor you can generate:
 - OpenAPI parameter schemas
 - server documentation
 
-If you later want zero duplication between `core` and `query`, the part worth moving into `core` is the data-only artifact manifest, not the RSQL or HTTP code.
+If you later want zero duplication between `core` and the query layer, the part worth moving into `core` is the data-only artifact manifest, not the RSQL or HTTP code.
 
 ## Practical First Increment
 
 If you build this in the monorepo now, I would do it in this order:
 
-1. Add a new `packages/query` package that depends on `@giduru/core`.
-2. Implement a collection registry for `postings`, `transactions`, `diagnostics`, `prices`, `balances`, `commodities`, `includes`, and `accountCatalog`.
+1. Keep extending `@giduru/core` so `LedgerAnalysis` remains the canonical stable artifact.
+2. Implement a collection registry for `postings`, `transactions`, `diagnostics`, `prices`, `balances`, `commodities`, `includes`, and `accountCatalog` in the layer that owns querying.
 3. Compile RSQL into a collection-specific predicate plan.
 4. Use `analysis.index` for equality and membership filters where possible.
-5. Add `giduru serve <root-file>` in `giduru-cli` as a thin HTTP adapter.
-6. Expose `GET /openapi.json` from the query package's runtime descriptors.
+5. Add `giduru serve <root-file>` in `giduru-cli` when the HTTP layer is ready.
+6. Expose `GET /openapi.json` from runtime descriptors owned above the core package.
 
 That architecture gives you:
 
@@ -257,7 +250,7 @@ The current engine already emits the right core artifacts for a first query laye
 
 The part that belongs in `core` is the canonical analysis model.
 
-The parts that should probably live outside `core` are:
+The parts that should live outside `core` are:
 
 - RSQL parsing
 - query execution policy

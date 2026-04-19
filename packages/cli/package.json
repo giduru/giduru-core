@@ -1,6 +1,6 @@
 {
   "name": "giduru-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thin command-line interface for @giduru/core.",
   "keywords": [
     "giduru",
@@ -47,10 +47,10 @@
     "publish:check": "npm run typecheck && npm test && npm run pack:dry-run",
     "publish:public": "npm_config_cache=.npm-cache npm publish --access public",
     "test": "npm run build --workspace @giduru/core && npm run build && node --test dist/test/**/*.test.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit --tsBuildInfoFile .tsconfig.typecheck.tsbuildinfo",
+    "typecheck": "npm run build --workspace @giduru/core && tsc -p tsconfig.json --noEmit --tsBuildInfoFile .tsconfig.typecheck.tsbuildinfo",
     "prepublishOnly": "npm run publish:check"
   },
   "dependencies": {
-    "@giduru/core": "^0.1.1"
+    "@giduru/core": "^0.2.0"
   }
 }

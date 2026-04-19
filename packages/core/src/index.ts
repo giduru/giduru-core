@@ -4,7 +4,7 @@ export {
   filterPostings,
   getPostingIdsForTag,
 } from './filter';
-export { analyzeLedgerDocuments } from './workspace';
+export { analyzeLedgerDocuments } from './api';
 export {
   resolveLatestLedgerPrice,
   resolveLedgerPrice,
@@ -27,11 +27,11 @@ export type {
   LedgerPrice,
   LedgerPriceResolutionQuery,
   LedgerSourceDocument,
+  LedgerSourceDocumentsInput,
   LedgerTag,
   LedgerTagFilter,
   ParseLedgerProgress,
   Posting,
   PostingKind,
   Transaction,
-  VerifyLedgerOptions,
 } from './types';

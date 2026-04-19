@@ -120,6 +120,10 @@ export type LedgerSourceDocument = {
   path: string;
 };
 
+export type LedgerSourceDocumentsInput =
+  | Iterable<LedgerSourceDocument>
+  | ReadonlyMap<string, LedgerSourceDocument>;
+
 export type ParsedLedgerFile = {
   accountDirectives: ParsedLedgerAccountDirective[];
   commodityDirectives: ParsedLedgerCommodityDirective[];
@@ -401,7 +405,6 @@ export type LedgerPostingFilter = {
 export type AnalyzeLedgerDocumentsOptions = {
   onProgress?: (progress: ParseLedgerProgress) => void;
   rootFilePaths?: string[];
-  verifyOptions?: VerifyLedgerOptions;
 };
 
 export type LedgerPriceResolutionQuery = {

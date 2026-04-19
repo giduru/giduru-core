@@ -2,11 +2,12 @@
 
 const { performance } = require('node:perf_hooks');
 
+const { analyzeLedgerDocuments } = require('../dist/src');
 const {
-  analyzeLedgerDocuments,
+  analyzeLedgerDocuments: analyzeLedgerDocumentsWithState,
   analyzeLedgerState,
   applyLedgerDocumentChanges,
-} = require('../dist/src');
+} = require('../dist/src/engine');
 
 const BYTES_PER_MB = 1024 * 1024;
 
@@ -453,23 +454,21 @@ function buildScenarios(config) {
 
 async function runFullAnalysis(documents, rootFilePath) {
   const startedAt = performance.now();
-  const { analysis, workspace } = await analyzeLedgerDocuments(documents, {
+  const analysis = await analyzeLedgerDocuments(documents, {
     rootFilePaths: [rootFilePath],
-    verifyOptions: verifyOptionsForPaths(documents.keys(), rootFilePath),
   });
 
   return metricsFromRun({
     analysis,
-    parsedFileCount: workspace.files.length,
-    reusedFileCount: workspace.reusedFileCount,
+    parsedFileCount: analysis.parserSummary.fileCount,
+    reusedFileCount: analysis.parserSummary.reusedFileCount,
     wallMs: performance.now() - startedAt,
   });
 }
 
 async function seedIncrementalState(documents, rootFilePath) {
-  const seeded = await analyzeLedgerDocuments(documents, {
+  const seeded = await analyzeLedgerDocumentsWithState(documents, {
     rootFilePaths: [rootFilePath],
-    verifyOptions: verifyOptionsForPaths(documents.keys(), rootFilePath),
   });
 
   ensureHealthyScenario('incremental-seed', metricsFromRun({
@@ -799,13 +798,6 @@ function createLedgerDocument(path, content, lastModified = 1) {
     lastModified,
     name: path.split('/').pop() ?? path,
     path,
-  };
-}
-
-function verifyOptionsForPaths(paths, rootFilePath) {
-  return {
-    availableFilePaths: Array.from(paths),
-    rootFilePaths: [rootFilePath],
   };
 }
 

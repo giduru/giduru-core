@@ -23,7 +23,7 @@ This package is maintained from the [`giduru/giduru-core`](https://github.com/gi
 
 ## Public API
 
-- `analyzeLedgerDocuments(documentsByPath, options)`
+- `analyzeLedgerDocuments(documents, options?)`
 - `filterPostings(analysis, filter)`
 - `filterPostingIds(analysis, filter)`
 - `getPostingIdsForTag(index, tag)`
@@ -38,12 +38,22 @@ These stable exports live at the package root:
 import { analyzeLedgerDocuments, filterPostings, resolveLatestLedgerPrice } from '@giduru/core';
 ```
 
+The root `analyzeLedgerDocuments()` API is intentionally narrow:
+
+- input: `LedgerSourceDocument` snapshots
+- output: `LedgerAnalysis`
+- no parser workspace handles
+- no incremental engine state handles
+
+That is the semver-stable contract for the package.
+
 ## Engine API
 
 The broader parser/incremental engine surface is still available from:
 
 ```ts
 import {
+  analyzeLedgerDocuments,
   analyzeLedgerState,
   applyLedgerDocumentChanges,
   buildParsedLedgerWorkspace,
@@ -68,6 +78,16 @@ type LedgerSourceDocument = {
 };
 ```
 
+## Host Boundary
+
+`@giduru/core` is intentionally storage-agnostic.
+
+- CLI code should read from the local filesystem and convert files into `LedgerSourceDocument` values.
+- React Native or PWA code should do the same from whatever local or synced store they use.
+- Cloud code should do the same from S3 or another object store.
+
+The core package should not know where documents came from. It only sees explicit snapshots.
+
 ## Incremental Model
 
 `applyLedgerDocumentChanges()` reparses only:
@@ -76,12 +96,6 @@ type LedgerSourceDocument = {
 - existing files with glob includes when the known path set changes
 
 Everything else stays cached in `parsedFilesByPath`.
-
-The app adapter in `apps/mobile/src/services/ledger-analysis.ts` now:
-
-- avoids rereading unchanged disk files
-- passes dirty drafts directly as document content
-- reuses the engine state across analysis runs
 
 ## Directive Semantics
 
